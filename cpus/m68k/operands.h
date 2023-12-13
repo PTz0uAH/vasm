@@ -70,7 +70,7 @@ enum {
   BD,BS,AK,MS,MR,CFMM,CFMN,ND,NI,NJ,NK,BY,BI,BJ,OF_,
   _CCR,_SR,_USP,_CACHES,_ACC,_MACSR,_MASK,_CTRL,_ACCX,_AEXT,
   _VAL,_FC,_RP_030,_RP_851,_TC,_AC,_M1_B,_BAC,_BAD,_PSR,_PCSR,
-  _TT,SH,VX,VXR2,VXR4,OVX
+  _TT,SH,VX,VXR2,VXR4,OVX,VXBF
 };
 
 struct optype optypes[] = {
@@ -354,6 +354,8 @@ struct optype optypes[] = {
   _(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),OTF_SPECREG|OTF_VXRNG4|OTF_SRRANGE|OTF_CHKREG,REG_VX00,REG_VX23,
 /* OVX (Apollo) optional En register */
   _(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),OTF_OPT|OTF_SPECREG|OTF_SRRANGE|OTF_CHKREG,REG_VX00,REG_VX23,
+/* VXBF (Apollo) En{b1:b2} */
+  _(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),OTF_SPECREG|OTF_SRRANGE|OTF_CHKREG|FL_Bitfield,REG_VX00,REG_VX23,
 };
 
 #undef _
@@ -453,9 +455,9 @@ static void insert_ammx(unsigned char *d,struct oper_insert *i,operand *o)
 /* place to put an operand */
 enum {
   NOP=0,NEA,SEA,MEA,BEA,KEA,REA,EAM,BRA,DBR,RHI,RLO,RL4,R2H,R2M,R2L,R2P,
-  FPN,FPM,FMD,C2H,A2M,A2L,AXA,AXB,AXD,AX0,CS1,CS2,CS3,MDL,DVL,TBL,FPS,FPC,
-  RMM,RMW,RMY,RMX,ACX,ACR,DL8,DL4,D3Q,DL3,CAC,D16,S16,D2R,ELC,EL8,E8R,
-  EL3,EL4,EM3,EM4,EH3,BAX,FCR,F13,M3Q,MSF,ACW,AHI,ALO,LIN
+  FPN,FPM,FMD,C2H,A2M,A2L,R3H,AXA,AXB,AXD,AX0,CS1,CS2,CS3,MDL,DVL,TBL,
+  FPS,FPC,RMM,RMW,RMY,RMX,ACX,ACR,DL8,DL4,D3Q,DL3,CAC,D16,S16,D2R,ELC,
+  EL8,E8R,EL3,EL4,EM3,EM4,EH3,BAX,FCR,F13,M3Q,MSF,ACW,AHI,ALO,LIN
 };
 
 struct oper_insert insert_info[] = {
@@ -527,6 +529,9 @@ struct oper_insert insert_info[] = {
 
 /* A2L register 4 bits in 2nd word bits 3-0 (Apollo AMMX) */
   M_reg,4,28,0,0,
+
+/* R3H register 4 bits in 3rd word bits 15-12 (Apollo TEX instruction) */
+  M_reg,4,32,0,0,
 
 /* AXA vector register field A (Apollo AMMX) */
   M_func,4,28,IIF_A|IIF_ABSVAL,insert_ammx,

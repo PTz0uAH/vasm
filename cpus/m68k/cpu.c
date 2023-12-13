@@ -1,6 +1,6 @@
 /*
 ** cpu.c Motorola M68k, CPU32 and ColdFire cpu-description file
-** (c) in 2002-2022 by Frank Wille
+** (c) in 2002-2023 by Frank Wille
 */
 
 #include <math.h>
@@ -9,24 +9,24 @@
 
 #include "operands.h"
 
-const struct specreg SpecRegs[] = {
+static const struct specreg SpecRegs[] = {
 #include "specregs.h"
 };
-static int specreg_cnt = sizeof(SpecRegs)/sizeof(SpecRegs[0]);
+static const int specreg_cnt = sizeof(SpecRegs)/sizeof(SpecRegs[0]);
 
 mnemonic mnemonics[] = {
 #include "opcodes.h"
 };
-int mnemonic_cnt = sizeof(mnemonics)/sizeof(mnemonics[0]);
+const int mnemonic_cnt = sizeof(mnemonics)/sizeof(mnemonics[0]);
 
 const struct cpu_models models[] = {
 #include "cpu_models.h"
 };
-int model_cnt = sizeof(models)/sizeof(models[0]);
+static const int model_cnt = sizeof(models)/sizeof(models[0]);
 
 
-char *cpu_copyright="vasm M68k/CPU32/ColdFire cpu backend 2.5f (c) 2002-2022 Frank Wille";
-char *cpuname = "M68k";
+const char *cpu_copyright="vasm M68k/CPU32/ColdFire cpu backend 2.6c (c) 2002-2023 Frank Wille";
+const char *cpuname = "M68k";
 int bitsperbyte = 8;
 int bytespertaddr = 4;
 
@@ -88,6 +88,10 @@ static unsigned char no_dpc = 0;      /* abs. PC-displacments not allowed */
 static unsigned char extsd = 0;       /* small-data with ext. addr. modes */
 static char current_ext;              /* extension of current parsed inst. */
 
+/* minimum and maximum distance+1 for B<cc>.B branches */
+static taddr bmin = -0x80;
+static taddr bmax = 0x80;
+
 static char b_str[] = "b";
 static char w_str[] = "w";
 static char l_str[] = "l";
@@ -115,6 +119,7 @@ static int OC_NOT,OC_NOOP,OC_FNOP,OC_MOVEA,OC_EXT,OC_MVZ,OC_MOVE;
 static int OC_ASRI,OC_LSRI,OC_ASLI,OC_LSLI,OC_NEG;
 static int OC_FMOVEMTOLIST,OC_FMOVEMTOSPEC,OC_FMOVEMFROMSPEC;
 static int OC_FMUL,OC_FSMUL,OC_FDMUL,OC_FSGLMUL,OC_LOAD,OC_SWAP;
+static int OC_ADDQVX,OC_SUBQVX;
 
 static struct {
   int *var;
@@ -125,6 +130,7 @@ static struct {
   &OC_ADD,              "add",    DA,0,
   &OC_ADDA,             "adda",   0,0,
   &OC_ADDQ,             "addq",   0,AD,
+  &OC_ADDQVX,           "addq",   0,VX,
   &OC_ASLI,             "asl",    QI,0,
   &OC_ASRI,             "asr",    QI,0,
   &OC_BRA,              "bra",    0,0,
@@ -156,6 +162,7 @@ static struct {
   &OC_ST,               "st",     AD,0,
   &OC_SUBA,             "suba",   0,0,
   &OC_SUBQ,             "subq",   0,AD,
+  &OC_SUBQVX,           "subq",   0,VX,
   &OC_SWAP,             "swap",   D_,0,
   &OC_TST,              "tst",    0,0,
   &OC_NOOP,             " no-op", 0,0
@@ -379,8 +386,15 @@ void cpu_opts(void *opts)
       if (devpac_compat)
         set_g2_symbol();
       set_internal_abs(vasmsym_name,cpu_type&CPUMASK);
-      if (cpu_type & apollo)
+      if (cpu_type & apollo) {
         check_apollo_conflicts();
+        bmin = -256;
+        bmax = 256;
+      }
+      else {
+        bmin = -128;
+        bmax = 128;
+      }
       break;
     case OCMD_FPU:
       fpu_id = arg;
@@ -845,7 +859,7 @@ static signed char getreg(char **start,int indexreg)
   signed char reg = -1;
   regsym *sym;
 
-  if (loc = get_local_label(0,&s)) {
+  if (loc = get_local_label(1,&s)) {
     p = loc->str;
     q = p + loc->len;
   }
@@ -965,7 +979,7 @@ static signed char getbreg(char **start)
   strbuf *loc;
   regsym *sym;
 
-  if (loc = get_local_label(0,&s)) {
+  if (loc = get_local_label(1,&s)) {
     p = loc->str;
     q = p + loc->len;
   }
@@ -1002,7 +1016,7 @@ static signed char getfreg(char **start)
   strbuf *loc;
   regsym *sym;
 
-  if (loc = get_local_label(0,&s)) {
+  if (loc = get_local_label(1,&s)) {
     p = loc->str;
     q = p + loc->len;
   }
@@ -1115,7 +1129,7 @@ static char *getspecreg(char *s,operand *op,int first,int last,int cpuchk)
     s += 2;
     q = s;
   }
-  else if (loc = get_local_label(0,&s)) {
+  else if (loc = get_local_label(1,&s)) {
     p = loc->str;
     q = p + loc->len;
   }
@@ -1167,7 +1181,7 @@ static char *getctrlreg(char *s,operand *op,int first,int last)
   char *q;
   strbuf *loc;
 
-  if (loc = get_local_label(0,&s)) {
+  if (loc = get_local_label(1,&s)) {
     p = loc->str;
     q = p + loc->len;
   }
@@ -1363,7 +1377,7 @@ static short getbasereg(char **start)
   short r = 0;
   regsym *sym;
 
-  if (loc = get_local_label(0,&s)) {
+  if (loc = get_local_label(1,&s)) {
     p = loc->str;
     q = p + loc->len;
     r = -1;
@@ -1506,7 +1520,7 @@ static void check_basereg(operand *op)
 /* Check if the operand's address register matches one of the currently
    active BASEREG registers and automatically subtract its base-expression
    from the operand's displacement value.
-   op->reg ist guaranteed to be between 0 and 7 and op->mode has an
+   op->reg is guaranteed to be between 0 and 7 and op->mode has an
    appropriate addressing mode! */
 {
   if (op->reg<=6 && baseexp[op->reg] && op->value[0]) {
@@ -2449,6 +2463,31 @@ static void optimize_oper(operand *op,struct optype *ot,section *sec,
           if (final && warn_opts>1)
             cpu_error(49,"(0,An,...)->(An,...)");
         }
+        else if (extsd && sdreg>=0 && bdopt && opt_bdisp && op->base[0] &&
+                 ((opt_gen && (op->base[0]->flags&NEAR)) ||
+                  (opt_sd && LOCREF(op->base[0]) &&
+                  (op->base[0]->sec->flags&NEAR_ADDRESSING))) &&
+                 op->extval[0]>=0 && op->extval[0]<=0xffff) {
+          /* base relative addressing in 020 full format */
+
+          if ((op->format & FW_IndexSuppress) &&
+              (ot->modes & (1<<AM_An16Disp)) &&
+              !(op->flags & FL_ZIndex)) {
+            /* (label,An,ZRn) --> (label,An) small-data */
+            op->mode = MODE_An16Disp;
+            op->format = 0;
+            op->flags &= ~(FL_UsesFormat | FL_020up | FL_noCPU32);
+            if (final && warn_opts>1)
+              cpu_error(49,"(label,An,ZRn)->(label,An) baserel");
+          }
+          else {
+            /* (label,An,Rn) --> (label.w,An,Rn) small data*/
+            op->format &= ~FW_BDSize(FW_SizeMask);
+            op->format |= FW_BDSize(FW_Word);
+            if (final && warn_opts>1)
+              cpu_error(49,"(label,An,Rn)->(label.w,An,Rn) baserel");
+          }
+        }
         else if (bdopt && (op->base[0] || (!op->base[0] && !size16[0])) &&
                  FW_getBDSize(op->format)==FW_Word) {
           /* (bd16,An,...) --> (bd32,An,...) */
@@ -2776,10 +2815,10 @@ static void incr_ea(operand *op,taddr offset,int final)
 }
 
 
-static int aindir_in_list(operand *op,taddr list)
-/* tests if operand is (An)+ or -(An) and An is present in register list */
+static int aindir_in_list(operand *op,int mfirst,int mlast,taddr list)
+/* tests if operand is in given mode-range and An is present in reg. list */
 {
-  if (op->mode==MODE_AnPostInc || op->mode==MODE_AnPreDec)
+  if (op->mode>=mfirst && op->mode<=mlast)
     return (list & (1 << (REGAn + REGget(op->reg)))) != 0;
   return 0;
 }
@@ -3324,7 +3363,7 @@ dontswap:
 
   else if ((opt_gen || opt_movem) && (oc & 0xfbff) == 0x4880) {
     /* MOVEM */
-    int o = (oc & 0x0400) ? 1 : 0;
+    int o = (oc & 0x0400) ? 1 : 0;  /* register list operand */
 
     if (ip->op[o]->mode==MODE_Extended &&
         (ip->op[o]->reg==REG_RnList || ip->op[o]->reg==REG_Immediate) &&
@@ -3338,30 +3377,31 @@ dontswap:
         if (final && warn_opts>1)
           cpu_error(51,"movem deleted");
       }
-      else if (regs == 1) {
+      else if (regs==1 && (opt_movem || (!(list&0xff) && o==1)) &&
+               !aindir_in_list(ip->op[o^1],
+                               MODE_AnPostInc,MODE_AnPreDec,list)) {
         /* a single register - MOVEM <ea>,Rn --> MOVE <ea>,Rn */
-        if ((opt_movem || (!(list&0xff) && o==1)) &&
-            !aindir_in_list(ip->op[o^1],list)) {
-          signed char r = lsbit(list,0,16);
+        signed char r = lsbit(list,0,16);
 
-          ip->code = OC_MOVE;
-          ip->op[o]->mode = REGisAn(r) ? MODE_An : MODE_Dn;
-          ip->op[o]->reg = REGget(r);
-          if (final && (warn_opts>1 || (warn_opts && ((list&0xff) || o==0))))
-            cpu_error(51,"movem ea,Rn -> move ea,Rn");
-        }
+        ip->code = OC_MOVE;
+        ip->op[o]->mode = REGisAn(r) ? MODE_An : MODE_Dn;
+        ip->op[o]->reg = REGget(r);
+        if (final && (warn_opts>1 || (warn_opts && ((list&0xff) || o==0))))
+          cpu_error(51,"movem ea,Rn -> move ea,Rn");
       }
-      else if (regs==2 && opt_speed &&
-               ((cpu_type & m68040) || (!(cpu_type & (m68000|m68010)) &&
-                ip->op[o^1]->mode<=MODE_AnPreDec))) {
+      else if (regs==2 && (opt_movem || (!(list&0xff) && o==1)) &&
+               ((opt_speed && (cpu_type & m68040)) ||
+               (ip->op[o^1]->mode<=MODE_AnPreDec &&
+                ip->op[o^1]->mode>=MODE_AnPostInc &&
+                ((cpu_type & m68020up) || o==1))) &&
+               !aindir_in_list(ip->op[o^1],
+                               MODE_AnIndir,MODE_An8Format,list)) {
         /* MOVEM with two registers is faster with two separate MOVEs,
-           when not using 68000 or 68010. Addressing modes with displacement
-           or extended addressing modes for 68040 only. */
+           unless having Rn/Rm,<ea> on a 68000/68010. Addressing modes with
+           displacement or extended addressing for 68040+opt_speed only. */
         taddr offs = ext=='l' ? 4 : 2;
 
-        if ((opt_movem || (!(list&0xff) && o==1)) &&
-            test_incr_ea(ip->op[o^1],offs) &&
-            !aindir_in_list(ip->op[o^1],list)) {
+        if (!(cpu_type & m68040) || test_incr_ea(ip->op[o^1],offs)) {
           signed char r = lsbit(list,0,16);
           instruction *ip2;
 
@@ -3498,7 +3538,10 @@ dontswap:
         ip->op[0]->reg==REG_Immediate && abs) {
       /* ADD/ADDI/ADDA/SUB/SUBI/SUBA Immediate --> ADDQ/SUBQ */
       if (opt_quick && val>=1 && val<=8) {
-        ip->code = (oc&0x4200) ? OC_ADDQ : OC_SUBQ;
+        if ((cpu_type&apollo) && ip->op[1]->mode==MODE_SpecReg)
+          ip->code = (oc&0x4200) ? OC_ADDQVX : OC_SUBQVX;
+        else
+          ip->code = (oc&0x4200) ? OC_ADDQ : OC_SUBQ;
         if (final && warn_opts>1)
           cpu_error(51,"add/sub #x -> addq/subq #x");
       }
@@ -3963,12 +4006,7 @@ dontswap:
 
       switch (lastsize) {
         case 0:
-#if 0
-          /* keep branch deleted until no more optimizations took place */
-          if (diff!=-2 && done)
-#else
           if (diff != -2)
-#endif
             ip->qualifiers[0] = b_str;
           else
             ip->code = -1;
@@ -3976,7 +4014,7 @@ dontswap:
         case 2:
           if (diff==0 && oc!=0x6100 && !resolvewarn)
             ip->code = -1;
-          else if (diff<-0x80 || diff>0x7f || diff==0)
+          else if (diff<bmin || diff>=bmax || diff==0)
             ip->qualifiers[0] = w_str;
           else
             ip->qualifiers[0] = b_str;
@@ -3988,7 +4026,7 @@ dontswap:
             else
               ip->qualifiers[0] = w_str;
           }
-          else if (diff>=-0x80 && diff<=0x80 && !resolvewarn) {
+          else if (diff>=bmin && diff<=bmax && !resolvewarn) {
             ip->qualifiers[0] = b_str;
           }
           else if (diff<-0x8000 || diff>0x7fff) {
@@ -4278,9 +4316,22 @@ size_t instruction_size(instruction *realip,section *sec,taddr pc)
 
   extsize = mnemo->ext.size;
 
-  /* remember the instruction's original extension, before optimizations */
-  if (realip->ext.un.real.orig_ext < 0)
+  if (realip->ext.un.real.orig_ext < 0) {
+    /* remember the instruction's original extension, before optimizations */
     realip->ext.un.real.orig_ext = (signed char)ext;
+
+    /* Special MOVEQ handling:
+       moveq.l allows out of range values without warning,
+       and for Devpac-compat. a bad size extension will be ignored */
+    if (realip->code == OC_MOVEQ) {
+      if (ext == 'l')
+        realip->ext.un.real.flags |= IFL_ANYSIGN;  /* allow signed/unsigned */
+      if (devpac_compat) {
+        ext = '\0';
+        realip->qualifiers[0] = emptystr;
+      }
+    }
+  }
 
   if (opt_allbra && ign_unambig_ext && ext) {
     /* Strip the size extension from branch instructions, no matter if
@@ -4423,18 +4474,22 @@ size_t instruction_size(instruction *realip,section *sec,taddr pc)
 
 
 static void write_val(unsigned char *d,int pos,int size,taddr val,int sign)
-/* insert value 'val' with 'size' bits at bit-position 'pos' */
+/* Insert value 'val' with 'size' bits at bit-position 'pos'.
+   sign==0 allows unsigned values with 'size' bits. Otherwise signed.
+   sign<0 indicates that any value in signed and unsigned range is allowed. */
 {
   if (typechk) {
     if (sign) {
       if ((val > (1L << (size-1)) - 1) || (val < -(1L << (size-1)))) {
-        if (val > 0 && val < (1L << size))
-          cpu_error(27,val,-(1L<<(size-1)),
-                    (1L<<(size-1))-1,
-                    val-(1L<<size));    /* using signed operand as unsigned */
-        else
+        if (val > 0 && val < (1L << size)) {
+          if (sign > 0)
+            cpu_error(27,val,-(1L<<(size-1)),
+                      (1L<<(size-1))-1,
+                      val-(1L<<size));   /* using signed operand as unsigned */
+        }
+        else                             /* operand value out of range */
           cpu_error(25,val,-(1L<<(size-1)),
-                    (1L<<(size-1))-1);  /* operand value out of range */
+                    (sign>0) ? (1L<<(size-1))-1 : (1L<<size)-1);
       }
     }
     else {
@@ -4525,6 +4580,10 @@ static unsigned char *write_branch(dblock *db,unsigned char *d,operand *op,
       case 's':
         if (diff>=-0x80 && diff<=0x7f && diff!=0 && (diff!=-1 || !lbra))
           *(d-1) = diff & 0xff;
+        else if ((cpu_type&apollo) && diff>=128 && diff<=254)
+          *(d-1) = ((diff-128) & 0xff) | 1;
+        else if ((cpu_type&apollo) && diff>=-256 && diff<=-130)
+          *(d-1) = ((diff+128) & 0xff) | 1;
         else
           cpu_error(28);  /* branch destination out of range */
         break;
@@ -4986,7 +5045,11 @@ dblock *eval_instruction(instruction *ip,section *sec,taddr pc)
   unsigned char ipflags = ip->ext.un.real.flags;
   signed char lastsize = ip->ext.un.real.last_size;
   instruction *realip = ip;
+  int oldtypechk = typechk;
   uint8_t *d;
+
+  if (ipflags & IFL_NOTYPECHK)
+    typechk = 0;
 
   /* really execute optimizations now */
   ipslot = 0;
@@ -5032,9 +5095,10 @@ dblock *eval_instruction(instruction *ip,section *sec,taddr pc)
           operand *op = ip->op[i];
 
           if (op->mode == MODE_SpecReg) {
-            op->mode = (mnemo->ext.place[i] == SEA || mnemo->ext.place[i] == MEA) ? MODE_Dn : MODE_FPn;
+            op->mode = (mnemo->operand_type[i] == F_) ? MODE_FPn : MODE_Dn;
             op->reg = (op->reg - REG_VX00) % 8;
-            op->flags = 0;
+            /* @@@ need any other flags be preserved? */
+            op->flags &= FL_BFoffsetDyn|FL_BFwidthDyn;
           }
         }
       }
@@ -5137,6 +5201,19 @@ dblock *eval_instruction(instruction *ip,section *sec,taddr pc)
             case SIZE_WORD:     *(dbstart+2) |= 0x10; break;
             case SIZE_DOUBLE:   *(dbstart+2) |= 0x14; break;
             case SIZE_BYTE:     *(dbstart+2) |= 0x18; break;
+          }
+          break;
+        case S_TEX:
+          *(dbstart+4) |= 0x08;  /* make Au.L in 3rd word of TEX instruction */
+          switch (sz) {
+            case SIZE_WORD:
+              *(dbstart+4) |= 0x02;
+              *(dbstart+5) |= 0x01;
+              break;
+            case SIZE_LONG:
+              *(dbstart+4) |= 0x04;
+              *(dbstart+5) |= 0x02;
+              break;
           }
           break;
         default:
@@ -5244,6 +5321,10 @@ dblock *eval_instruction(instruction *ip,section *sec,taddr pc)
           case M_val0:
             if (op->base[0] == NULL) {
               taddr v = op->extval[0];
+              int sign = (oii->flags&IIF_SIGNED) != 0;
+
+              if (ipflags & IFL_ANYSIGN)
+                sign = -sign;
 
               if (oii->flags & IIF_MASK) {
                 if (v == 0)
@@ -5259,8 +5340,7 @@ dblock *eval_instruction(instruction *ip,section *sec,taddr pc)
               }
               if (oii->flags & IIF_REVERSE)
                 v = reverse(v,oii->size);
-              write_val(dbstart,oii->pos,oii->size,v,
-                        (oii->flags&IIF_SIGNED)!=0);
+              write_val(dbstart,oii->pos,oii->size,v,sign);
             }
             else
               cpu_error(24);  /* absolute value expected */
@@ -5293,6 +5373,7 @@ eval_done:
   /* restore flags and last_size of real ip to allow instruction_size() */
   realip->ext.un.real.flags = ipflags;
   realip->ext.un.real.last_size = lastsize;
+  typechk = oldtypechk;
 
   return db;
 }
@@ -5483,10 +5564,14 @@ int init_cpu()
        Set it to 99 when creating an object file of unknown format. */
     if (!strcmp(output_format,"tos"))
       f = 0;
-    else if (!strcmp(output_format,"hunkexe"))
-      f = 4;
+    if (!strcmp(output_format,"dri"))
+      f = 1;
+    if (!strcmp(output_format,"gst"))
+      f = 2;
     else if (!strcmp(output_format,"hunk"))
       f = 3;
+    else if (!strcmp(output_format,"hunkexe"))
+      f = 4;
     set_internal_abs(lk_name,f);
   }
 

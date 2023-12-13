@@ -3,14 +3,14 @@
 
 #include "vasm.h"
 
-char *cpu_copyright="vasm c16x/st10 cpu backend 0.2c (c) in 2002-2005 Volker Barthelmann";
-char *cpuname="c16x";
+const char *cpu_copyright="vasm c16x/st10 cpu backend 0.2c (c) in 2002-2005 Volker Barthelmann";
+const char *cpuname="c16x";
 
 mnemonic mnemonics[]={
 #include "opcodes.h"
 };
 
-int mnemonic_cnt=sizeof(mnemonics)/sizeof(mnemonics[0]);
+const int mnemonic_cnt=sizeof(mnemonics)/sizeof(mnemonics[0]);
 
 int bitsperbyte=8;
 int bytespertaddr=4;
@@ -341,7 +341,7 @@ static taddr absoffset2(expr *tree,int mod,section *sec,taddr pc,rlist **relocs,
     if(mod==MOD_DPPX){
       static int dpplen;
       static char *dppname;
-      char *id=base->name;
+      const char *id=base->name;
       symbol *dppsym;
       size-=2;
       if(strlen(id)+9>dpplen){
