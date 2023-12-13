@@ -1,5 +1,5 @@
 /* syntax.c  syntax module for vasm */
-/* (c) in 2002-2022 by Frank Wille */
+/* (c) in 2002-2023 by Frank Wille */
 
 #include "vasm.h"
 
@@ -12,7 +12,7 @@
    be provided by the main module.
 */
 
-char *syntax_copyright="vasm oldstyle syntax module 0.17 (c) 2002-2022 Frank Wille";
+const char *syntax_copyright="vasm oldstyle syntax module 0.19a (c) 2002-2023 Frank Wille";
 hashtable *dirhash;
 int dotdirs;
 
@@ -23,8 +23,6 @@ static char bssname[]=".bss",bssattr[]="aurw";
 static char zeroname[]=".zero",zeroattr[]="aurw";
 
 char commentchar=';';
-char *defsectname = textname;
-char *defsecttype = textattr;
 
 static char macname[] = ".mac";
 static char macroname[] = ".macro";
@@ -77,7 +75,7 @@ static unsigned anon_labno;
 #define INLLABFMT "=%06d"
 static int inline_stack[INLSTACKSIZE];
 static int inline_stack_index;
-static char *saved_last_global_label;
+static const char *saved_last_global_label;
 static char inl_lab_name[8];
 
 int igntrail;  /* ignore everything after a blank in the operand field */
@@ -302,15 +300,73 @@ static void handle_secdata(char *s)
 }
 
 
+static atom *do_space(int size,expr *cnt,expr *fill)
+{
+  atom *a = new_space_atom(cnt,size>>3,fill);
+
+  add_atom(0,a);
+  return a;
+}
+
+
+static void handle_space(char *s,int size)
+{
+  expr *cnt,*fill=0;
+
+  cnt = parse_expr_tmplab(&s);
+  s = skip(s);
+  if (*s == ',') {
+    s = skip(s+1);
+    fill = parse_expr_tmplab(&s);
+  }
+  do_space(size,cnt,fill);
+  eol(s);
+}
+
+
+static void handle_uspace(char *s,int size)
+{
+  expr *cnt;
+  atom *a;
+
+  cnt = parse_expr_tmplab(&s);
+  a = do_space(size,cnt,0);
+  a->content.sb->flags |= SPC_UNINITIALIZED;
+  eol(s);
+}
+
+
+static void handle_fixedspc1(char *s)
+{
+  do_space(8,number_expr(1),0);
+  eol(s);
+}
+
+
+static void handle_fixedspc2(char *s)
+{
+  do_space(8,number_expr(2),0);
+  eol(s);
+}
+
+
 static void handle_d8(char *s)
 {
-  handle_data(s,8);
+  s = skip(s);
+  if (ISEOL(s))
+    handle_fixedspc1(s);
+  else
+    handle_data(s,8);
 }
 
 
 static void handle_d16(char *s)
 {
-  handle_data(s,16);
+  s = skip(s);
+  if (ISEOL(s))
+    handle_fixedspc2(s);
+  else
+    handle_data(s,16);
 }
 
 
@@ -423,56 +479,6 @@ static void handle_align(char *s)
 static void handle_even(char *s)
 {
   do_alignment(2,number_expr(0));
-  eol(s);
-}
-
-
-static atom *do_space(int size,expr *cnt,expr *fill)
-{
-  atom *a = new_space_atom(cnt,size>>3,fill);
-
-  add_atom(0,a);
-  return a;
-}
-
-
-static void handle_space(char *s,int size)
-{
-  expr *cnt,*fill=0;
-
-  cnt = parse_expr_tmplab(&s);
-  s = skip(s);
-  if (*s == ',') {
-    s = skip(s+1);
-    fill = parse_expr_tmplab(&s);
-  }
-  do_space(size,cnt,fill);
-  eol(s);
-}
-
-
-static void handle_uspace(char *s,int size)
-{
-  expr *cnt;
-  atom *a;
-
-  cnt = parse_expr_tmplab(&s);
-  a = do_space(size,cnt,0);
-  a->content.sb->flags |= SPC_UNINITIALIZED;
-  eol(s);
-}
-
-
-static void handle_fixedspc1(char *s)
-{
-  do_space(8,number_expr(1),0);
-  eol(s);
-}
-
-
-static void handle_fixedspc2(char *s)
-{
-  do_space(8,number_expr(2),0);
   eol(s);
 }
 
@@ -593,7 +599,7 @@ static void handle_section(char *s)
     s = skip(s+1);
     if (attrbuf = get_raw_string(&s,'\"')) {
       attr = attrbuf->str;
-      s = skip(s+1);
+      s = skip(s);
     }
   }
   if (attr == NULL) {
@@ -1022,16 +1028,18 @@ static void handle_struct(char *s)
 
 static void handle_endstruct(char *s)
 {
+  section *structsec = current_section;
   section *prevsec;
   symbol *szlabel;
 
   if (end_structure(&prevsec)) {
     /* create the structure name as label defining the structure size */
-    current_section->flags &= ~LABELS_ARE_LOCAL;
-    szlabel = new_labsym(0,current_section->name);
-    add_atom(0,new_label_atom(szlabel));
+    structsec->flags &= ~LABELS_ARE_LOCAL;
+    szlabel = new_labsym(0,structsec->name);
     /* end structure declaration by switching to previous section */
     set_section(prevsec);
+    /* avoid that this label is moved into prevsec in set_section() */
+    add_atom(structsec,new_label_atom(szlabel));
   }
   eol(s);
 }
@@ -1040,7 +1048,7 @@ static void handle_endstruct(char *s)
 static void handle_inline(char *s)
 {
   static int id;
-  char *last;
+  const char *last;
 
   if (inline_stack_index < INLSTACKSIZE) {
     sprintf(inl_lab_name,INLLABFMT,id);
@@ -1072,7 +1080,7 @@ static void handle_einline(char *s)
 
 
 struct {
-  char *name;
+  const char *name;
   void (*func)(char *);
 } directives[] = {
   "org",handle_org,
@@ -1083,6 +1091,7 @@ struct {
   "roffs",handle_roffs,
   "align",handle_align,
   "even",handle_even,
+  "byt",handle_d8,
   "byte",handle_d8,
   "db",handle_d8,
   "dfb",handle_d8,
@@ -1094,7 +1103,10 @@ struct {
   "bss",handle_secbss,
   "wor",handle_d16,
   "word",handle_d16,
+  "wrd",handle_d16,
+#if !defined(VASM_CPU_6809)  /* clash with 6309 ADDR instruction */
   "addr",handle_taddr,
+#endif
   "dw",handle_d16,
   "dfw",handle_d16,
   "defw",handle_d16,
@@ -1111,8 +1123,8 @@ struct {
   "blk",handle_spc8,
   "blkw",handle_spc16,
   "dc",handle_spc8,
-  "byt",handle_fixedspc1,
-  "wrd",handle_fixedspc2,
+  "byt",handle_d8,
+  "wrd",handle_d16,
   "assert",handle_assert,
 #if defined(VASM_CPU_TR3200) /* Clash with IFxx instructions of TR3200 cpu */
   "if_def",handle_ifd,
@@ -1371,8 +1383,24 @@ static char *parse_label_or_pc(char **start)
     s = skip(s+1);
   }
   else {
-    name = parse_labeldef(start,0);
-    s = skip(*start);
+    int lvalid;
+
+    if (isspace((unsigned char )*s)) {
+      s = skip(s);
+      lvalid = 0;  /* colon required, when label doesn't start at 1st column */
+    }
+    else lvalid = 1;
+
+    if (name = parse_symbol(&s)) {
+      s = skip(s);
+      if (*s == ':') {
+        s++;
+        if (*s=='+' || *s=='-')
+          return NULL;  /* likely an operand with anonymous label reference */
+      }
+      else if (!lvalid)
+        return NULL;
+    }
   }
 
   if (name==NULL && *s==current_pc_char && !ISIDCHAR(*(s+1))) {
@@ -1627,8 +1655,13 @@ void parse(void)
     }
 #endif
 
-    if (ip)
+    if (ip) {
+#if MAX_OPERANDS>0
+      if (!igntrail && ip->op[0]==NULL && op_cnt!=0)
+        syntax_error(6);  /* mnemonic without operands has tokens in op.field */
+#endif
       add_atom(0,new_inst_atom(ip));
+    }
   }
 
   cond_check();
@@ -1923,12 +1956,15 @@ int init_syntax()
   current_pc_str[0] = current_pc_char;
   current_pc_str[1] = 0;
 
-  /* colon must be attached to the label to make anonymous labels work */
-  colon_at_label = 1;
-
   if (orgmode != ~0)
     set_section(new_org(orgmode));
   return 1;
+}
+
+
+int syntax_defsect(void)
+{
+  return 0;  /* defaults to .text */
 }
 
 

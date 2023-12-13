@@ -12,13 +12,11 @@
    be provided by the main module.
 */
 
-char *syntax_copyright="vasm test syntax module (c) 2002 Volker Barthelmann";
+const char *syntax_copyright="vasm test syntax module (c) 2002 Volker Barthelmann";
 
 hashtable *dirhash;
 char commentchar=';';
 int dotdirs;
-char *defsectname = NULL;
-char *defsecttype = NULL;
 
 
 char *skip(char *s)
@@ -91,8 +89,7 @@ static void handle_section(char *s)
     s=skip(s+1);
   }else
     attr="";
-  new_section(name,attr,1);
-  switch_section(name,attr);
+  set_section(new_section(name,attr,1));
   eol(s);
 }
 
@@ -221,7 +218,7 @@ static void handle_bsss(char *s){ handle_section(".bss,\"aurw4\"");eol(s);}
 static void handle_sbsss(char *s){ handle_section(".bss,\"aurw4\"");eol(s);}
 
 struct {
-  char *name;
+  const char *name;
   void (*func)(char *);
 } directives[]={
   "section",handle_section,
@@ -418,6 +415,11 @@ int init_syntax()
   }
   
   return 1;
+}
+
+int syntax_defsect(void)
+{
+  return 0;
 }
 
 int syntax_args(char *p)

@@ -1,5 +1,5 @@
 /* syntax.c  syntax module for vasm */
-/* (c) in 2002-2022 by Frank Wille */
+/* (c) in 2002-2023 by Frank Wille */
 
 #include "vasm.h"
 
@@ -12,7 +12,7 @@
    be provided by the main module.
 */
 
-char *syntax_copyright="vasm motorola syntax module 3.16 (c) 2002-2022 Frank Wille";
+const char *syntax_copyright="vasm motorola syntax module 3.18 (c) 2002-2023 Frank Wille";
 hashtable *dirhash;
 char commentchar = ';';
 int dotdirs;
@@ -27,8 +27,6 @@ static char rs_name[] = "__RS";
 static char so_name[] = "__SO";
 static char fo_name[] = "__FO";
 static char line_name[] = "__LINE__";
-char *defsectname = code_name;
-char *defsecttype = code_type;
 
 static struct namelen macro_dirlist[] = {
   { 5,"macro" }, { 0,0 }
@@ -56,7 +54,7 @@ static int check_comm;
 static int dot_idchar;
 static char local_char = '.';
 
-/* (currenty two-byte only) padding value for CNOPs */
+/* (currently two-byte only) padding value for CNOPs */
 #ifdef VASM_CPU_M68K
 static taddr cnop_pad = 0x4e71;
 #else
@@ -73,8 +71,9 @@ static int id_stack_index;
 #define INLLABFMT "=%06d"
 static int inline_stack[INLSTACKSIZE];
 static int inline_stack_index;
-static char *saved_last_global_label;
+static const char *saved_last_global_label;
 static char inl_lab_name[8];
+static int local_id;
 
 static int parse_end = 0;
 static expr *carg1;
@@ -204,6 +203,23 @@ char *skip_operand(char *s)
   if (par_cnt != 0)
     syntax_error(4);  /* missing closing parentheses */
   return s;
+}
+
+
+/* make the given struct- or frame-offset symbol dividable my the next
+   multiple of "align" (must be a power of 2!) */
+static void setoffset_align(char *symname,int dir,utaddr align)
+{
+  symbol *sym;
+  expr *new;
+
+  sym = internal_abs(symname);
+  --align;  /* @@@ check it */
+  new = make_expr(BAND,
+                  make_expr(dir>0?ADD:SUB,sym->expr,number_expr(align)),
+                  number_expr(~align));
+  simplify_expr(new);
+  sym->expr = new;
 }
 
 
@@ -408,7 +424,7 @@ static char *read_sec_attr(char *attr,char *s,uint32_t *mem)
 }
 
 
-static void motsection(section *sec,uint32_t mem)
+static section *motsection(section *sec,uint32_t mem)
 /* mot-syntax specific section initializations on a new section */
 {
   if (!devpac_compat)
@@ -424,11 +440,16 @@ static void motsection(section *sec,uint32_t mem)
 #endif
 
   /* set optional memory attributes (e.g. AmigaOS hunk format Chip/Fast) */
-  sec->memattr = mem;
+  if (sec->memattr!=0 && sec->memattr!=mem)
+    syntax_error(27,sec->name);  /* modified memory attributes for section */
+  else
+    sec->memattr = mem;
 
   /* a section named __MERGED allows base-relative addressing optimizations */
   if (!strcmp(sec->name,"__MERGED"))
     sec->flags |= NEAR_ADDRESSING;
+
+  return sec;
 }
 
 
@@ -472,11 +493,8 @@ static void handle_section(char *s)
     /* otherwise a missing section type defaults to CODE */
     strcpy(attr,code_type);
   }
-
-  if (s) {
-    motsection(new_section(name,attr,1),mem);
-    switch_section(name,attr);
-  }
+  if (s)
+    set_section(motsection(new_section(name,attr,1),mem));
 }
 
 
@@ -498,8 +516,7 @@ static void handle_offset(char *s)
 static void nameattrsection(char *secname,char *sectype,uint32_t mem)
 /* switch to a section called secname, with attributes sectype+addattr */
 {
-  motsection(new_section(secname,sectype,1),mem);
-  switch_section(secname,sectype);
+  set_section(motsection(new_section(secname,sectype,1),mem));
 }
 
 static void handle_csec(char *s)
@@ -558,7 +575,9 @@ static void handle_org(char *s)
       syntax_error(7);  /* syntax error */
   }
   else {
-    if (current_section!=NULL && !(current_section->flags & ABSOLUTE))
+    if (current_section!=NULL &&
+        (!(current_section->flags & ABSOLUTE) ||
+          (current_section->flags & IN_RORG)))
       start_rorg(parse_constexpr(&s));
     else
       set_section(new_org(parse_constexpr(&s)));
@@ -583,7 +602,7 @@ static void handle_rorg(char *s)
 }
 
 
-static void do_bind(char *s,int bind)
+static void do_bind(char *s,unsigned bind)
 {
   symbol *sym;
   strbuf *name;
@@ -596,13 +615,29 @@ static void do_bind(char *s,int bind)
     }
     sym = new_import(name->str);
     if ((sym->flags & (EXPORT|WEAK|NEAR)) != 0 &&
-        (sym->flags & (EXPORT|WEAK|NEAR)) != bind)
+        (sym->flags & (EXPORT|WEAK|NEAR)) != (bind & (EXPORT|WEAK|NEAR))) {
       general_error(62,sym->name,get_bind_name(sym)); /* binding already set */
-    else
+    }
+    else {
       sym->flags |= bind;
+      if ((bind & XREF)!=0 && sym->type!=IMPORT)
+        general_error(85,sym->name);  /* xref must not be defined already */
+    }
     s = skip(s);
   }
   while (*s++ == ',');
+}
+
+
+static void handle_xref(char *s)
+{
+  do_bind(s,EXPORT|XREF);
+}
+
+
+static void handle_xdef(char *s)
+{
+  do_bind(s,EXPORT|XDEF);
 }
 
 
@@ -620,7 +655,7 @@ static void handle_weak(char *s)
 
 static void handle_nref(char *s)
 {
-  do_bind(s,EXPORT|NEAR);
+  do_bind(s,EXPORT|XREF|NEAR);
 }
 
 
@@ -1202,16 +1237,18 @@ static void handle_struct(char *s)
 
 static void handle_endstruct(char *s)
 {
+  section *structsec = current_section;
   section *prevsec;
   symbol *szlabel;
 
   if (end_structure(&prevsec)) {
     /* create the structure name as label defining the structure size */
-    current_section->flags &= ~LABELS_ARE_LOCAL;
-    szlabel = new_labsym(0,current_section->name);
-    add_atom(0,new_label_atom(szlabel));
+    structsec->flags &= ~LABELS_ARE_LOCAL;
+    szlabel = new_labsym(0,structsec->name);
     /* end structure declaration by switching to previous section */
     set_section(prevsec);
+    /* avoid that this label is moved into prevsec in set_section() */
+    add_atom(structsec,new_label_atom(szlabel));
   }
 }
 #endif
@@ -1316,7 +1353,7 @@ static void handle_ifmacrond(char *s)
   ifmacro(s,0);
 }
 
-static int eval_ifexp_advance(char **s,int c)
+static int eval_ifexp(char **s,int c)
 {
   expr *condexp = parse_expr_tmplab(s);
   taddr val;
@@ -1341,14 +1378,9 @@ static int eval_ifexp_advance(char **s,int c)
   return b;
 }
 
-static int eval_ifexp(char *s,int c)
-{
-  return eval_ifexp_advance(&s,c);
-}
-
 static void ifexp(char *s,int c)
 {
-  cond_if(eval_ifexp(s,c));
+  cond_if(eval_ifexp(&s,c));
 }
 
 /* Move line_ptr to the end of the string if the parsing should stop,
@@ -1368,11 +1400,11 @@ static char *handle_iif(char *line_ptr)
     /* Move the line ptr to the beginning of the iif expression. */
     line_ptr = skip(line_ptr);
 
-    /* As eval_ifexp_advance() may modify the input string, duplicate
+    /* As eval_ifexp() may modify the input string, duplicate
        it for the case when the parsing should continue. */
     expr_copy = mystrdup(line_ptr);
     expr_end = expr_copy;
-    condition = eval_ifexp_advance(&expr_end,1);
+    condition = eval_ifexp(&expr_end,1);
     expr_len = expr_end - expr_copy;
     myfree(expr_copy);
 
@@ -1435,6 +1467,11 @@ static void handle_else(char *s)
   cond_skipelse();
 }
 
+static void handle_elseif(char *s)
+{
+  cond_skipelse();
+}
+
 static void handle_endif(char *s)
 {
   cond_endif();
@@ -1448,7 +1485,12 @@ static void handle_rsreset(char *s)
 
 static void handle_rsset(char *s)
 {
-  new_abs(rs_name,number_expr(parse_constexpr(&s)));
+  new_abs(rs_name,parse_expr_tmplab(&s));
+}
+
+static void handle_rseven(char *s)
+{
+  setoffset_align(rs_name,1,2);
 }
 
 static void handle_clrfo(char *s)
@@ -1458,7 +1500,7 @@ static void handle_clrfo(char *s)
 
 static void handle_setfo(char *s)
 {
-  new_abs(fo_name,number_expr(parse_constexpr(&s)));
+  new_abs(fo_name,parse_expr_tmplab(&s));
 }
 
 static void handle_rs8(char *s)
@@ -1679,17 +1721,22 @@ static void handle_comment(char *s)
   /* otherwise it's just a comment to be ignored */
 }
 
+static void handle_local(char *s)
+{
+  sprintf(inl_lab_name,INLLABFMT,local_id++);
+  set_last_global_label(mystrdup(inl_lab_name));
+}
+
 static void handle_inline(char *s)
 {
-  static int id;
-  char *last;
+  const char *last;
 
   if (inline_stack_index < INLSTACKSIZE) {
-    sprintf(inl_lab_name,INLLABFMT,id);
+    sprintf(inl_lab_name,INLLABFMT,local_id);
     last = set_last_global_label(inl_lab_name);
     if (inline_stack_index == 0)
       saved_last_global_label = last;
-    inline_stack[inline_stack_index++] = id++;
+    inline_stack[inline_stack_index++] = local_id++;
   }
   else
     syntax_error(22,INLSTACKSIZE);  /* maximum inline nesting depth exceeded */
@@ -1727,7 +1774,7 @@ static void handle_popsect(char *s)
 #define D 1 /* available for DevPac */
 #define P 2 /* available for PhxAss */
 struct {
-  char *name;
+  const char *name;
   int avail;
   void (*func)(char *);
 } directives[] = {
@@ -1748,15 +1795,15 @@ struct {
   "bss_c",P|D,handle_bssc,
   "bss_f",P|D,handle_bssf,
   "public",P,handle_global,
-  "xdef",P|D,handle_global,
-  "xref",P|D,handle_global,
-  "xref.l",P|D,handle_global,
+  "xdef",P|D,handle_xdef,
+  "xref",P|D,handle_xref,
+  "xref.l",P|D,handle_xref,
   "nref",P,handle_nref,
   "entry",0,handle_global,
   "extrn",0,handle_global,
   "global",0,handle_global,
-  "import",0,handle_global, /* modifictation: pink-rg: handle purec syntax */
-  "export",0,handle_global, /* modifictation: pink-rg: handle purec syntax */
+  "import",0,handle_xref,   /* modifictation: pink-rg: handle purec syntax */
+  "export",0,handle_xdef,   /* modifictation: pink-rg: handle purec syntax */
   "weak",0,handle_weak,
   "comm",0,handle_comm,
 #ifndef VASM_CPU_JAGRISC    /* conflicts with Jaguar load instruction */
@@ -1874,10 +1921,12 @@ struct {
   "if2",0,handle_ifp2,
   "else",P|D,handle_else,
   "elseif",P|D,handle_else,
+  "elif",0,handle_elseif,
   "endif",P|D,handle_endif,
   "endc",P|D,handle_endif,
   "rsreset",P|D,handle_rsreset,
   "rsset",P|D,handle_rsset,
+  "rseven",0,handle_rseven,
   "clrso",P,handle_rsreset,
   "setso",P,handle_rsset,
   "clrfo",P,handle_clrfo,
@@ -1912,6 +1961,7 @@ struct {
   "printv",0,handle_printv,
   "showoffset",P,handle_showoffset,
   "auto",0,handle_noop,
+  "local",0,handle_local,
   "inline",P,handle_inline,
   "einline",P,handle_einline,
 #if STRUCT
@@ -2139,6 +2189,10 @@ void parse(void)
           cond_else();
         else if (directives[idx].func == handle_endif)
           cond_endif();
+        else if (directives[idx].func == handle_elseif) {
+          s = skip(s);
+          cond_elseif(eval_ifexp(&s,1));
+        }
       }
       continue;
     }
@@ -2161,6 +2215,8 @@ void parse(void)
       if (!strnicmp(s,"equ",3) && isspace((unsigned char)*(s+3))) {
         s = skip(s+3);
         label = new_equate(labname,parse_expr_tmplab(&s));
+        if (!devpac_compat && !phxass_compat)
+          label->flags |= symflags;
       }
 #if FLOAT_PARSER
       else if (!strnicmp(s,"fequ.",5) && isspace((unsigned char)*(s+6))) {
@@ -2186,6 +2242,8 @@ void parse(void)
         else {
           s = skip(s);
           label = new_equate(labname,parse_expr_tmplab(&s));
+          if (!devpac_compat && !phxass_compat)
+            label->flags |= symflags;
         }
       }
       else if (!strnicmp(s,"set",3) && isspace((unsigned char)*(s+3))) {
@@ -2307,8 +2365,13 @@ void parse(void)
     }
 #endif
 
-    if (ip)
+    if (ip) {
+#if MAX_OPERANDS>0
+      if (allow_spaces && ip->op[0]==NULL && op_cnt!=0)
+        syntax_error(6);  /* mnemonic without operands has tokens in op.field */
+#endif
       add_atom(0,new_inst_atom(ip));
+    }
   }
 
   cond_check();  /* check for open conditional blocks */
@@ -2498,7 +2561,7 @@ int expand_macro(source *src,char **line,char *d,int dlen)
               nc = -1;
           }
         }
-        if (*s++ != '>') {
+        if (*s++!='>' || nc<=0) {
           syntax_error(19);  /* invalid numeric expansion */
           return 0;
         }
@@ -2701,6 +2764,14 @@ int init_syntax(void)
 }
 
 
+int syntax_defsect(void)
+{
+  defsectname = code_name;
+  defsecttype = code_type;
+  return 1;
+}
+
+
 int syntax_args(char *p)
 {
   if (!strcmp(p,"-align")) {
@@ -2718,6 +2789,7 @@ int syntax_args(char *p)
     dot_idchar = 1;
     allmp = 1;
     warn_unalloc_ini_dat = 1;
+    disable_warning(84);  /* allow labels with section directives */
     return 1;
   }
   else if (!strcmp(p,"-phxass")) {
@@ -2728,6 +2800,7 @@ int syntax_args(char *p)
     allow_spaces = 1;
     dot_idchar = 1;
     allmp = 1;
+    disable_warning(84);  /* allow labels with section directives */
     return 1;
   }
   else if (!strcmp(p,"-spaces")) {
@@ -2740,6 +2813,10 @@ int syntax_args(char *p)
   }
   else if (!strcmp(p,"-localu")) {
     local_char = '_';
+    return 1;
+  }
+  else if (!strcmp(p,"-nolocpfx")) {
+    local_char = 0;
     return 1;
   }
   else if (!strcmp(p,"-warncomm")) {
