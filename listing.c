@@ -1,5 +1,5 @@
 /* listing.h - listing file */
-/* (c) in 2020-2022 by Volker Barthelmann and Frank Wille */
+/* (c) in 2020-2023 by Volker Barthelmann and Frank Wille */
 
 #include "vasm.h"
 
@@ -156,7 +156,7 @@ static void print_list_header(FILE *f,int cnt)
 static void write_listing_old(char *listname,section *first_section)
 {
   FILE *f;
-  int nsecs,i,cnt=0,nl;
+  int nsecs,i,cnt=0;
   section *secp;
   listing *p;
   atom *a;
@@ -184,7 +184,7 @@ static void write_listing_old(char *listname,section *first_section)
       a=a->next;
     if(a&&a->type==DATA){
       int size=a->content.db->size;
-      char *dp=a->content.db->data;
+      unsigned char *dp=a->content.db->data;
       pc=p->pc;
       fprintf(f,"%05lX %d ",(unsigned long)pc,(int)(p->sec?p->sec->idx:0));
       for(i=0;i<8;i++){
@@ -228,7 +228,7 @@ static void write_listing_old(char *listname,section *first_section)
     while(a){
       if(a->type==DATA){
         int size=a->content.db->size;
-        char *dp=a->content.db->data+i;
+        unsigned char *dp=a->content.db->data+i;
 
         if(i<size){
           for(;i<size;i++){
@@ -387,7 +387,7 @@ static void write_listing_old(char *listname,section *first_section)
 
 static void write_listing_wide(char *listname,section *first_section)
 {
-  int addrw = bytespertaddr*2;  /* width of address field */
+  int addrw = bytespertaddr*(bitsperbyte/8)*2;  /* width of address field */
   source *lastsrc = NULL;
   FILE *f;
   section *secp;
@@ -513,7 +513,7 @@ static void write_listing_wide(char *listname,section *first_section)
     qsort(symlist,nsyms,sizeof(symbol *),namecmp);  /* sort by name */
     for (i=0; i<nsyms; i++) {
       sym = symlist[i];
-      fprintf(f,"%-31.31s ",sym->name);
+      fprintf(f,"%-31s ",sym->name);
       if (sym->flags & COMMON) {
         fprintf(f,"COM %lld bytes, alignment %lld",
                 (long long)get_sym_size(sym),(long long)sym->align);

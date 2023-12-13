@@ -1,5 +1,5 @@
 /* atom.c - atomic objects from source */
-/* (c) in 2010-2022 by Volker Barthelmann and Frank Wille */
+/* (c) in 2010-2023 by Volker Barthelmann and Frank Wille */
 
 #include "vasm.h"
 
@@ -7,7 +7,8 @@
 /* searches mnemonic list and tries to parse (via the cpu module)
    the operands according to the mnemonic requirements; returns an
    instruction or 0 */
-instruction *new_inst(char *inst,int len,int op_cnt,char **op,int *op_len)
+instruction *new_inst(const char *inst,int len,
+                      int op_cnt,char **op,int *op_len)
 {
 #if MAX_OPERANDS!=0
   operand ops[MAX_OPERANDS];
@@ -247,11 +248,11 @@ static size_t space_size(sblock *sb,section *sec,taddr pc)
 
 static size_t roffs_size(reloffs *roffs,section *sec,taddr pc)
 {
-  taddr offs;
+  utaddr offs;
 
-  eval_expr(roffs->offset,&offs,sec,pc);
-  offs = sec->org + offs - pc;
-  return offs>0 ? offs : 0;
+  eval_expr(roffs->offset,(taddr *)&offs,sec,pc);
+  return ((utaddr)sec->org + offs > (utaddr)pc) ?
+         (utaddr)sec->org + offs - (utaddr)pc : 0;
 }
 
 
@@ -451,11 +452,24 @@ void print_atom(FILE *f,atom *p)
 /* prints and formats an expression from a PRINTEXPR atom */
 void atom_printexpr(printexpr *pexp,section *sec,taddr pc)
 {
+  symbol *base=NULL;
   taddr t;
   long long v;
   int i;
 
-  eval_expr(pexp->print_exp,&t,sec,pc);
+  if (!eval_expr(pexp->print_exp,&t,sec,pc)) {
+    find_base(pexp->print_exp,&base,sec,pc);
+    if (base!=NULL &&
+        base->type==IMPORT && !(base->flags&(EXPORT|COMMON|WEAK))) {
+      printf("<undefined>");
+      if (t == 0)
+        return;
+      if (t > 0)
+        putchar('+');
+      pexp->type = PEXP_SDEC;
+    }
+  }
+
   if (pexp->type==PEXP_SDEC && (t&(1LL<<(pexp->size-1)))!=0) {
     /* signed decimal */
     v = -1;
@@ -572,7 +586,7 @@ void add_sleb128_atom(section *sec,taddr c)
 }
 
 
-atom *add_bytes_atom(section *sec,void *p,size_t sz)
+atom *add_bytes_atom(section *sec,const void *p,size_t sz)
 {
   dblock *db = new_dblock();
   atom *a;
@@ -662,7 +676,7 @@ atom *new_opts_atom(void *o)
 }
 
 
-atom *new_text_atom(char *txt)
+atom *new_text_atom(const char *txt)
 {
   atom *new = new_atom(PRINTTEXT,1);
 
@@ -714,7 +728,7 @@ atom *new_rorgend_atom(void)
 }
 
 
-atom *new_assert_atom(expr *aexp,char *exp,char *msg)
+atom *new_assert_atom(expr *aexp,const char *exp,const char *msg)
 {
   atom *new = new_atom(ASSERT,1);
 
@@ -726,7 +740,7 @@ atom *new_assert_atom(expr *aexp,char *exp,char *msg)
 }
 
 
-atom *new_nlist_atom(char *name,int type,int other,int desc,expr *value)
+atom *new_nlist_atom(const char *name,int type,int other,int desc,expr *value)
 {
   atom *new = new_atom(NLIST,1);
 

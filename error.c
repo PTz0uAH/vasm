@@ -1,31 +1,33 @@
 /* error.c - error output and modification routines */
-/* (c) in 2002-2021 by Volker Barthelmann and Frank Wille */
+/* (c) in 2002-2023 by Volker Barthelmann and Frank Wille */
 
 #include <stdarg.h>
 #include "vasm.h"
 #include "error.h"
 
-struct err_out general_err_out[]={
+static struct err_out general_err_out[]={
 #include "general_errors.h"
 };
-int general_errors=sizeof(general_err_out)/sizeof(general_err_out[0]);
+static const int general_errors=sizeof(general_err_out)/sizeof(general_err_out[0]);
 
-struct err_out syntax_err_out[]={
+static struct err_out syntax_err_out[]={
 #include "syntax_errors.h"
 };
-int syntax_errors=sizeof(syntax_err_out)/sizeof(syntax_err_out[0]);
+static const int syntax_errors=sizeof(syntax_err_out)/sizeof(syntax_err_out[0]);
 
-struct err_out cpu_err_out[]={
+static struct err_out cpu_err_out[]={
 #include "cpu_errors.h"
 };
-int cpu_errors=sizeof(cpu_err_out)/sizeof(cpu_err_out[0]);
+static const int cpu_errors=sizeof(cpu_err_out)/sizeof(cpu_err_out[0]);
 
-struct err_out output_err_out[]={
+static struct err_out output_err_out[]={
 #include "output_errors.h"
 };
-int output_errors=sizeof(output_err_out)/sizeof(output_err_out[0]);
+static const int output_errors=sizeof(output_err_out)/sizeof(output_err_out[0]);
 
-int errors,warnings;
+int errors,warnings;  /* count */
+
+/* options */
 int max_errors=5;
 int no_warn;
 
@@ -141,6 +143,11 @@ static void error(int n,va_list vl,struct err_out *errlist,int offset)
   if (!(flags & NOLINE) && cur_src!=NULL) {
     fprintf(f," in line %d of ",cur_src->line);
     print_source_file(f,cur_src);
+    if (cur_src->defsrc) {
+      fprintf(f," (line %d of ",cur_src->defline+cur_src->line);
+      print_source_file(f,cur_src->defsrc);
+      fputc(')',f);
+    }
   }
   fprintf(f,": ");
   vfprintf(f,errlist[n].text,vl);
@@ -153,12 +160,21 @@ static void error(int n,va_list vl,struct err_out *errlist,int offset)
 
       child = cur_src;
       while (parent = child->parent) {
-        if (child->num_params >= 0)
-          fprintf(f,"\tcalled");    /* macro called from */
-        else
+        if (child->srcfile)
           fprintf(f,"\tincluded");  /* included from */
+        else if (child->macro)
+          fprintf(f,"\tcalled");    /* macro called from */
+        else {
+          child = parent;           /* skip parent for repetitions */
+          continue;
+        }
         fprintf(f," from line %d of ",child->parent_line);
         print_source_file(f,parent);
+        if (parent->defsrc) {
+          fprintf(f," (line %d of ",parent->defline+child->parent_line);
+          print_source_file(f,parent->defsrc);
+          fputc(')',f);
+        }
 
         recurs = 1;
         while (parent->parent!=NULL &&
@@ -231,8 +247,8 @@ void output_atom_error(int n,atom *a,...)
 
   va_start(vl,a);
   /* temporarily set the source text and line from the given atom */
-  cur_src = a->src;
-  cur_src->line = a->line;
+  if ((cur_src = a->src) != NULL)
+    cur_src->line = a->line;
   error(n,vl,output_err_out,FIRST_OUTPUT_ERROR);
   cur_src = old;
   va_end(vl);

@@ -1,5 +1,5 @@
 /* vasm.c  main module for vasm */
-/* (c) in 2002-2022 by Volker Barthelmann */
+/* (c) in 2002-2023 by Volker Barthelmann */
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -10,42 +10,55 @@
 #include "stabs.h"
 #include "dwarf.h"
 
-#define _VER "vasm 1.9a"
-char *copyright = _VER " (c) in 2002-2022 Volker Barthelmann";
+#define _VER "vasm 1.9f"
+const char *copyright = _VER " (c) in 2002-2023 Volker Barthelmann";
 #ifdef AMIGA
 static const char *_ver = "$VER: " _VER " " __AMIGADATE__ "\r\n";
 #endif
 
 /* The resolver will run another pass over the current section as long as any
-   label location or atom size has changed. It gives up at MAXPASSES, which
-   hopefully will never happen.
-   During the first FASTOPTPHASE passes all instructions of a section will be
-   optimized at the same time. After that the resolver enters a safe mode,
-   where only a single instruction per pass is changed. */
+   label location or atom size has changed. It fails on reaching MAXPASSES,
+   which will hopefully never happen.
+   During the first FASTOPTPHASE passes all instructions of a section are
+   optimized at the same time. Thereafter the resolver enters a safe mode,
+   where only a single instruction is changed in every pass. */
 #define MAXPASSES 1500
 #define FASTOPTPHASE 200
 
-source *cur_src;
-char *filename,*debug_filename;
-section *current_section,container_section;
-char *inname,*outname;
-taddr inst_alignment;
-int done,secname_attr,unnamed_sections,nocase,no_symbols,asciiout;
-int pic_check,final_pass,debug,exec_out,chklabels,warn_unalloc_ini_dat;
-int nostdout;
-struct stabdef *first_nlist,*last_nlist;
+/* global options */
 char *output_format="test";
+char *inname,*outname;
+int chklabels,nocase,no_symbols,pic_check,unnamed_sections;
+unsigned space_init;
+taddr inst_alignment;
+
+/* global module options */
+int asciiout,secname_attr,warn_unalloc_ini_dat;
+
+/* MNEMOHTABSIZE should be defined by cpu module */
+#ifndef MNEMOHTABSIZE
+#define MNEMOHTABSIZE 0x1000
+#endif
+hashtable *mnemohash;
+
+char *filename,*debug_filename;
+source *cur_src;
+section *current_section,container_section;
+int num_secs;
+int debug,final_pass,exec_out,nostdout;
+char *defsectname,*defsecttype;
+taddr defsectorg;
+
 unsigned long long taddrmask;
 taddr taddrmin,taddrmax;
-unsigned space_init;
+
+/* for output modules supporting stabs */
+struct stabdef *first_nlist,*last_nlist;
+
 char emptystr[]="";
 char vasmsym_name[]="__VASM";
-int num_secs;
 
-static char *listname;
 static FILE *outfile;
-static char *dep_filename;
-
 static int maxpasses=MAXPASSES;
 static section *first_section,*last_section;
 #if NOT_NEEDED
@@ -57,17 +70,13 @@ static section *prev_sec,*prev_org;
 static section *secstack[SECSTACKSIZE];
 static int secstack_index;
 
-/* MNEMOHTABSIZE should be defined by cpu module */
-#ifndef MNEMOHTABSIZE
-#define MNEMOHTABSIZE 0x1000
-#endif
-hashtable *mnemohash;
-
-static int dwarf;
+/* options */
+static char *listname,*dep_filename;
+static int dwarf,fail_on_warning;
 static int verbose=1,auto_import=1;
-static int fail_on_warning;
 static taddr sec_padding;
 
+/* output */
 static char *output_copyright;
 static void (*write_object)(FILE *,section *,symbol *);
 static int (*output_args)(char *);
@@ -140,15 +149,14 @@ static void remove_unalloc_sects(void)
 static void roffs_to_space(section *sec,atom *p)
 {
   uint8_t padding[MAXPADBYTES];
-  taddr space,padbytes,n;
+  utaddr space,padbytes,n;
   sblock *sb = NULL;
 
-  if (eval_expr(p->content.roffs->offset,&space,sec,sec->pc) &&
+  if (eval_expr(p->content.roffs->offset,(taddr *)&space,sec,sec->pc) &&
       (p->content.roffs->fillval==NULL ||
-       eval_expr(p->content.roffs->fillval,&n,sec,sec->pc))) {
-    space = sec->org + space - sec->pc;
-
-    if (space >= 0) {
+       eval_expr(p->content.roffs->fillval,(taddr *)&n,sec,sec->pc))) {
+    if ((utaddr)sec->org + space > (utaddr)sec->pc) {
+      space = (utaddr)sec->org + space - (utaddr)sec->pc;
       if (p->content.roffs->fillval == NULL) {
         memcpy(padding,sec->pad,MAXPADBYTES);
         padbytes = sec->padbytes;
@@ -179,8 +187,6 @@ static void roffs_to_space(section *sec,atom *p)
         p->content.sb = new_sblock(number_expr(space),1,0);
       }
     }
-    else
-      general_error(20);  /* rorg is lower than current pc */
   }
   else
     general_error(30);  /* expression must be constant */
@@ -252,7 +258,7 @@ static int resolve_section(section *sec)
   taddr rorg_pc,org_pc;
   int fastphase=FASTOPTPHASE;
   int pass=0;
-  int extrapass,rorg;
+  int done,extrapass,rorg;
   size_t size;
   atom *p;
 
@@ -560,10 +566,14 @@ static void undef_syms(void)
   symbol *sym;
 
   for(sym=first_symbol;sym;sym=sym->next){
-    if (!auto_import&&sym->type==IMPORT&&!(sym->flags&(EXPORT|COMMON|WEAK)))
-      general_error(22,sym->name);
-    else if (sym->type==IMPORT&&!(sym->flags&REFERENCED))
-      general_error(61,sym->name);
+    if(sym->type==IMPORT){
+      if (!auto_import&&!(sym->flags&(EXPORT|COMMON|WEAK)))
+        general_error(22,sym->name);  /* undefined */
+      else if (sym->flags&XDEF)
+        general_error(86,sym->name);  /* missing definition */
+      else if (!(sym->flags&(REFERENCED|COMMON|WEAK)))
+        general_error(61,sym->name);  /* not referenced */
+    }
   }
 }
 
@@ -629,10 +639,10 @@ static void set_taddr(void)
 
 static void statistics(void)
 {
-  section *sec;
   unsigned long long size;
+  section *sec;
 
-  printf("\n");
+  putchar('\n');
   for(sec=first_section;sec;sec=sec->next){
     size=(utaddr)(sec->pc)-(utaddr)(sec->org);
     printf("%s(%s%lu):\t%12llu byte%c\n",sec->name,sec->attr,
@@ -640,43 +650,39 @@ static void statistics(void)
   }
 }
 
+static struct {
+  const char *name;
+  int executable;
+  int (*init)(char **,void (**)(FILE *,section *,symbol *),int (**)(char *));
+} out_formats[] = {
+  "aout",0,init_output_aout,
+  "bin",0,init_output_bin,
+  "cdef",0,init_output_cdef,
+  "dri",0,init_output_tos,
+  "elf",0,init_output_elf,
+  "gst",0,init_output_gst,
+  "hunk",0,init_output_hunk,
+  "hunkexe",1,init_output_hunk,
+  "ihex",0,init_output_ihex,
+  "o65",0,init_output_o65,
+  "o65exe",1,init_output_o65,
+  "srec",0,init_output_srec,
+  "test",0,init_output_test,
+  "tos",1,init_output_tos,
+  "vobj",0,init_output_vobj,
+  "woz",0,init_output_woz,
+  "xfile",1,init_output_xfile,
+};
+
 static int init_output(char *fmt)
 {
-  if(!strcmp(fmt,"test"))
-    return init_output_test(&output_copyright,&write_object,&output_args);
-  if(!strcmp(fmt,"elf"))
-    return init_output_elf(&output_copyright,&write_object,&output_args);
-  if(!strcmp(fmt,"bin"))
-    return init_output_bin(&output_copyright,&write_object,&output_args);
-  if(!strcmp(fmt,"srec"))
-    return init_output_srec(&output_copyright,&write_object,&output_args);
-  if(!strcmp(fmt,"vobj"))
-    return init_output_vobj(&output_copyright,&write_object,&output_args);
-  if(!strcmp(fmt,"hunk"))
-    return init_output_hunk(&output_copyright,&write_object,&output_args);
-  if(!strcmp(fmt,"aout"))
-    return init_output_aout(&output_copyright,&write_object,&output_args);
-  if(!strcmp(fmt,"hunkexe")){
-    exec_out=1;  /* executable format */
-    return init_output_hunk(&output_copyright,&write_object,&output_args);
-  }
-  if(!strcmp(fmt,"tos")){
-    exec_out=1;  /* executable format */
-    return init_output_tos(&output_copyright,&write_object,&output_args);
-  }
-  if(!strcmp(fmt,"xfile")){
-    exec_out=1;  /* executable format */
-    return init_output_xfile(&output_copyright,&write_object,&output_args);
-  }
-  if(!strcmp(fmt,"cdef"))
-    return init_output_cdef(&output_copyright,&write_object,&output_args);
-  if(!strcmp(fmt,"ihex"))
-    return init_output_ihex(&output_copyright,&write_object,&output_args);
-  if(!strcmp(fmt,"o65"))
-    return init_output_o65(&output_copyright,&write_object,&output_args);
-  if(!strcmp(fmt,"o65exe")) {
-    exec_out=1;  /* executable format */
-    return init_output_o65(&output_copyright,&write_object,&output_args);
+  static size_t num_out_formats=sizeof(out_formats)/sizeof(out_formats[0]);
+  size_t i;
+  for(i=0;i<num_out_formats;i++){
+    if(!strcmp(fmt,out_formats[i].name)){
+      exec_out=out_formats[i].executable;
+      return out_formats[i].init(&output_copyright,&write_object,&output_args);
+    }
   }
   return 0;
 }
@@ -684,7 +690,7 @@ static int init_output(char *fmt)
 static int init_main(void)
 {
   int i;
-  char *mname;
+  const char *mname;
   hashdata data;
   mnemohash=new_hashtable(MNEMOHTABSIZE);
   i=0;
@@ -703,11 +709,6 @@ static int init_main(void)
   inst_alignment=INST_ALIGN;
   set_taddr();                 /* set initial taddr mask/min/max */
   return 1;
-}
-
-void set_default_output_format(char *fmt)
-{
-  output_format=fmt;
 }
 
 static void include_main_source(void)
@@ -733,6 +734,378 @@ static void include_main_source(void)
     if (src = stdin_source()) {
       setfilename(src->name);
       setdebugname(src->name);
+    }
+  }
+}
+
+/* searches a section by name and attr (if secname_attr set) */
+section *find_section(const char *name,const char *attr)
+{
+  section *p;
+  if(secname_attr){
+    for(p=first_section;p;p=p->next){
+      if(!strcmp(name,p->name) && !strcmp(attr,p->attr))
+        return p;
+    }
+  }
+  else{
+    for(p=first_section;p;p=p->next){
+      if(!strcmp(name,p->name))
+        return p;
+    }
+  }
+  return 0;
+}
+
+/* try to find a matching section name for the given attributes */
+static char *name_from_attr(const char *attr)
+{
+  while(*attr) {
+    switch(*attr++) {
+      case 'c': return "text";
+      case 'd': return "data";
+      case 'u': return "bss";
+    }
+  }
+  return emptystr;
+}
+
+static int move_label_to_sec(atom *lab,section *ns)
+{
+  if (lab->type == LABEL) {
+    section *os = lab->content.label->sec;  /* old section of label */
+    int deletable;
+    atom *a,*prev;
+
+    if ((os->flags & (LABELS_ARE_LOCAL|ABSOLUTE)) !=
+        (ns->flags & (LABELS_ARE_LOCAL|ABSOLUTE))) {
+      /* cannot move label into a section with different local/abs. flags */
+      general_error(82);  /* label definition not allowed here */
+      return 0;
+    }
+
+    /* find previous atom, check if section becomes empty */
+    for (deletable=1,prev=NULL,a=os->first; a; a=a->next) {
+      if (a->next == lab)
+        prev = a;
+      if (a != lab) {
+        switch (a->type) {
+          case LABEL:
+          case DATA:
+          case INSTRUCTION:
+          case SPACE:
+          case DATADEF:
+            deletable = 0;
+            break;
+        }
+      }
+    }
+
+    /* unlink label-atom from its old section */
+    if (prev == NULL) {
+      if (os->first == lab)
+        os->first = os->last = NULL;
+      else
+        ierror(0);  /* label atom not in its original section */
+    }
+    else {
+      if (os->last == lab)
+        os->last = prev;
+      prev->next = lab->next;
+    }
+
+    /* add label to new section */
+    ns->flags |= HAS_SYMBOLS;
+    lab->content.label->sec = ns;
+    lab->content.label->pc = ns->pc;
+    add_atom(ns,lab);
+
+    if (deletable) {
+      /* remove old section */
+      section *s;
+
+      if (first_section != os) {
+        for (s=first_section; s; s=s->next) {
+          if (s->next == os) {
+            if (last_section == os)
+              last_section = s;
+            s->next = os->next;
+            break;
+          }
+        }
+      }
+      else
+        first_section = os->next;
+      if (s == NULL)
+        ierror(0);  /* section not found in list */
+      /* @@@ free section and atoms here */
+    }
+  }
+  else
+    ierror(0);
+  return 1;
+}
+
+/* set current section, remember last */
+void set_section(section *s)
+{
+  atom *a;
+
+#if NOT_NEEDED
+  if (current_section!=NULL && !(current_section->flags & UNALLOCATED)) {
+    if (current_section->flags & ABSOLUTE)
+      prev_org = current_section;
+    else
+      prev_sec = current_section;
+  }
+#endif
+#if HAVE_CPU_OPTS
+  if (s!=NULL && !(s->flags & UNALLOCATED))
+    cpu_opts_init(s);  /* set initial cpu opts before the first atom */
+#endif
+
+  if (s!=NULL && current_section!=NULL && (a=current_section->last) != NULL) {
+    if (a->type==LABEL && a->src==cur_src && a->line==cur_src->line) {
+      /* make sure a label on the same line as a section directive is
+         moved into this new section */
+      if (move_label_to_sec(a,s))
+        general_error(83);  /* label def. on the same line as a new section */
+    }
+  }
+  current_section = s;
+}
+
+/* creates a new section with given attributes and alignment;
+   does not switch to this section automatically */
+section *new_section(char *name,char *attr,int align)
+{
+  section *p;
+  if(unnamed_sections)
+    name=name_from_attr(attr);
+  if(p=find_section(name,attr))
+    return p;
+  p=mymalloc(sizeof(*p));
+  p->next=0;
+  p->deps=0;
+  p->name=mystrdup(name);
+  p->attr=mystrdup(attr);
+  p->align=align;
+  p->org=p->pc=0;
+  p->flags=0;
+  p->memattr=0;
+  memset(p->pad,0,MAXPADBYTES);
+  if(sec_padding)
+    p->padbytes=make_padding(sec_padding,p->pad,MAXPADBYTES);
+  else
+    p->padbytes=1;
+  if(last_section)
+    last_section=last_section->next=p;
+  else
+    first_section=last_section=p;
+  /* transfer saved atoms from intermediate container, when needed */
+  p->first=container_section.first;
+  p->last=container_section.last;
+  container_section.first=container_section.last=0;
+  return p;
+}
+
+/* create a dummy code section for each new ORG directive */
+section *new_org(taddr org)
+{
+  static unsigned cnt;
+  char buf[16];
+  section *sec;
+
+  sprintf(buf,"org%04u:%llx",++cnt,(unsigned long long)org);
+  sec = new_section(buf,"acrwx",1);
+  sec->org = sec->pc = org;
+  sec->flags |= ABSOLUTE;  /* absolute destination address */
+  return sec;
+}
+
+/* switches current section to the section with the specified name */
+void switch_section(char *name,char *attr)
+{
+  section *p;
+  if(unnamed_sections)
+    name=name_from_attr(attr);
+  p=find_section(name,attr);
+  if(!p)
+    general_error(2,name);
+  else
+    set_section(p);
+}
+
+/* Switches current section to an offset section. Create a new section when
+   it doesn't exist yet or needs a different offset. */
+void switch_offset_section(char *name,taddr offs)
+{
+  static unsigned long id;
+  char unique_name[14];
+  section *sec;
+
+  if (!name) {
+    if (offs != -1)
+      ++id;
+    sprintf(unique_name,"OFFSET%06lu",id);
+    name = unique_name;
+  }
+  sec = new_section(name,"u",1);
+  sec->flags |= UNALLOCATED;
+  if (offs != -1)
+    sec->org = sec->pc = offs;
+  set_section(sec);
+}
+
+/* returns current_section or the syntax module's default section,
+   when undefined */
+section *default_section(void)
+{
+  section *sec = current_section;
+
+  if (!sec && defsecttype!=NULL) {
+    if (defsectname)
+      sec = new_section(defsectname,defsecttype,1);
+    else
+      sec = new_org(defsectorg);
+    set_section(sec);
+  }
+  return sec;
+}
+
+#if NOT_NEEDED
+/* restore last relocatable section */
+section *restore_section(void)
+{
+  if (prev_sec)
+    return prev_sec;
+  if (defsectname && defsecttype)
+    return new_section(defsectname,defsecttype,1);
+  return NULL;  /* no previous section or default section defined */
+}
+
+/* restore last absolute section */
+section *restore_org(void)
+{
+  if (prev_org)
+    return prev_org;
+  return new_org(0);  /* no previous org: default to ORG 0 */
+}
+#endif /* NOT_NEEDED */
+
+/* push current section onto the stack, does not switch to a new section */
+void push_section(void)
+{
+  if (current_section) {
+    if (secstack_index < SECSTACKSIZE)
+      secstack[secstack_index++] = current_section;
+    else
+      general_error(76);  /* section stack overflow */
+  }
+  else
+    general_error(3);  /* no current section */
+}
+
+/* pull the top section from the stack and switch to it */
+section *pop_section(void)
+{
+  if (secstack_index > 0)
+    set_section(secstack[--secstack_index]);
+  else
+    general_error(77);  /* section stack empty */
+  return current_section;
+}
+
+static void reset_rorg(section *s)
+{
+  add_atom(s,new_rorgend_atom());
+  if (s->flags & PREVABS)
+    s->flags |= ABSOLUTE;
+  else
+    s->flags &= ~ABSOLUTE;
+  s->flags &= ~IN_RORG;
+}
+
+/* end relocated ORG block in all sections after parsing */
+static void end_all_rorg(void)
+{
+  section *s;
+
+  for (s=first_section; s; s=s->next) {
+    if (s->flags & IN_RORG)
+      reset_rorg(s);
+  }
+}
+
+/* end a relocated ORG block */
+int end_rorg(void)
+{
+  section *s = default_section();
+
+  if (s == NULL) {
+    general_error(3);
+    return 0;
+  }
+  if (s->flags & IN_RORG) {
+    reset_rorg(s);
+    return 1;
+  }
+  general_error(44);  /* no Rorg block to end */
+  return 0;
+}
+
+/* end a relocated ORG block when currently active */
+void try_end_rorg(void)
+{
+  if (current_section!=NULL && (current_section->flags&IN_RORG))
+    end_rorg();
+}
+
+/* start a relocated ORG block */
+void start_rorg(taddr rorg)
+{
+  section *s = default_section();
+
+  if (s == NULL) {
+    general_error(3);
+    return;
+  }
+  if (s->flags & IN_RORG)
+    end_rorg();  /* we are already in a ROrg-block, so close it first */
+  add_atom(s,new_rorg_atom(rorg));
+  s->flags |= IN_RORG;
+  if (!(s->flags & ABSOLUTE)) {
+    s->flags &= ~PREVABS;
+    s->flags |= ABSOLUTE;  /* make section absolute during the ROrg-block */
+  }
+  else
+    s->flags |= PREVABS;
+}
+
+void print_section(FILE *f,section *sec)
+{
+  atom *p;
+  taddr pc=sec->org;
+  fprintf(f,"section %s (attr=<%s> align=%llu):\n",
+          sec->name,sec->attr,ULLTADDR(sec->align));
+  for(p=sec->first;p;p=p->next){
+    pc=pcalign(p,pc);
+    fprintf(f,"%8llx: ",ULLTADDR(pc));
+    print_atom(f,p);
+    fprintf(f,"\n");
+    pc+=atom_size(p,sec,pc);
+  }
+}
+
+static void set_defaults(void)
+{
+  /* When the output format didn't set a default section, then
+     let the syntax-module do it. */
+  if(defsecttype==NULL){
+    if (!syntax_defsect()){
+      /* still undefined, then default to a code-section named ".text" */
+      defsectname=".text";
+      defsecttype="acrx";
     }
   }
 }
@@ -768,10 +1141,8 @@ int main(int argc,char **argv)
   if(verbose){
     printf("%s\n%s\n%s\n%s\n",
            copyright,cpu_copyright,syntax_copyright,output_copyright);
-    if(verbose>1){
+    if(verbose==2)  /* -v */
       leave();
-      return 0;
-    }
   }
   for(i=1;i<argc;i++){
     if(argv[i][0]==0)
@@ -960,8 +1331,11 @@ int main(int argc,char **argv)
     }
     general_error(14,argv[i]);
   }
-  if(dwarf&&inname==NULL)
+  if(dwarf&&inname==NULL){
     dwarf=0;  /* no DWARF output when input source is from stdin */
+    general_error(84);
+  }
+  if(errors) leave();
   nostdout=depend&&dep_filename==NULL; /* dependencies to stdout nothing else */
   include_main_source();
   internal_abs(vasmsym_name);
@@ -972,7 +1346,9 @@ int main(int argc,char **argv)
   if(!init_cpu())
     general_error(10,"cpu");
   set_taddr();  /* update taddr mask/min/max */
+  set_defaults();
   parse();
+  end_all_rorg();
   listena=0;
   if(errors==0||produce_listing)
     resolve();
@@ -1017,256 +1393,4 @@ int main(int argc,char **argv)
   }
   leave();
   return 0; /* not reached */
-}
-
-/* searches a section by name and attr (if secname_attr set) */
-section *find_section(char *name,char *attr)
-{
-  section *p;
-  if(secname_attr){
-    for(p=first_section;p;p=p->next){
-      if(!strcmp(name,p->name) && !strcmp(attr,p->attr))
-        return p;
-    }
-  }
-  else{
-    for(p=first_section;p;p=p->next){
-      if(!strcmp(name,p->name))
-        return p;
-    }
-  }
-  return 0;
-}
-
-/* try to find a matching section name for the given attributes */
-static char *name_from_attr(char *attr)
-{
-  while(*attr) {
-    switch(*attr++) {
-      case 'c': return "text";
-      case 'd': return "data";
-      case 'u': return "bss";
-    }
-  }
-  return emptystr;
-}
-
-/* set current section, remember last */
-void set_section(section *s)
-{
-#if NOT_NEEDED
-  if (current_section!=NULL && !(current_section->flags & UNALLOCATED)) {
-    if (current_section->flags & ABSOLUTE)
-      prev_org = current_section;
-    else
-      prev_sec = current_section;
-  }
-#endif
-#if HAVE_CPU_OPTS
-  if (s!=NULL && !(s->flags & UNALLOCATED))
-    cpu_opts_init(s);  /* set initial cpu opts before the first atom */
-#endif
-  current_section = s;
-}
-
-/* creates a new section with given attributes and alignment;
-   does not switch to this section automatically */
-section *new_section(char *name,char *attr,int align)
-{
-  section *p;
-  if(unnamed_sections)
-    name=name_from_attr(attr);
-  if(p=find_section(name,attr))
-    return p;
-  p=mymalloc(sizeof(*p));
-  p->next=0;
-  p->deps=0;
-  p->name=mystrdup(name);
-  p->attr=mystrdup(attr);
-  p->align=align;
-  p->org=p->pc=0;
-  p->flags=0;
-  p->memattr=0;
-  memset(p->pad,0,MAXPADBYTES);
-  if(sec_padding)
-    p->padbytes=make_padding(sec_padding,p->pad,MAXPADBYTES);
-  else
-    p->padbytes=1;
-  if(last_section)
-    last_section=last_section->next=p;
-  else
-    first_section=last_section=p;
-  /* transfer saved atoms from intermediate container, when needed */
-  p->first=container_section.first;
-  p->last=container_section.last;
-  container_section.first=container_section.last=0;
-  return p;
-}
-
-/* create a dummy code section for each new ORG directive */
-section *new_org(taddr org)
-{
-  char buf[16];
-  section *sec;
-
-  sprintf(buf,"seg%llx",ULLTADDR(org));
-  sec = new_section(buf,"acrwx",1);
-  sec->org = sec->pc = org;
-  sec->flags |= ABSOLUTE;  /* absolute destination address */
-  return sec;
-}
-
-/* switches current section to the section with the specified name */
-void switch_section(char *name,char *attr)
-{
-  section *p;
-  if(unnamed_sections)
-    name=name_from_attr(attr);
-  p=find_section(name,attr);
-  if(!p)
-    general_error(2,name);
-  else
-    set_section(p);
-}
-
-/* Switches current section to an offset section. Create a new section when
-   it doesn't exist yet or needs a different offset. */
-void switch_offset_section(char *name,taddr offs)
-{
-  static unsigned long id;
-  char unique_name[14];
-  section *sec;
-
-  if (!name) {
-    if (offs != -1)
-      ++id;
-    sprintf(unique_name,"OFFSET%06lu",id);
-    name = unique_name;
-  }
-  sec = new_section(name,"u",1);
-  sec->flags |= UNALLOCATED;
-  if (offs != -1)
-    sec->org = sec->pc = offs;
-  set_section(sec);
-}
-
-/* returns current_section or the syntax module's default section,
-   when undefined */
-section *default_section(void)
-{
-  section *sec = current_section;
-
-  if (!sec && defsectname && defsecttype) {
-    sec = new_section(defsectname,defsecttype,1);
-    switch_section(defsectname,defsecttype);
-  }
-  return sec;
-}
-
-#if NOT_NEEDED
-/* restore last relocatable section */
-section *restore_section(void)
-{
-  if (prev_sec)
-    return prev_sec;
-  if (defsectname && defsecttype)
-    return new_section(defsectname,defsecttype,1);
-  return NULL;  /* no previous section or default section defined */
-}
-
-/* restore last absolute section */
-section *restore_org(void)
-{
-  if (prev_org)
-    return prev_org;
-  return new_org(0);  /* no previous org: default to ORG 0 */
-}
-#endif /* NOT_NEEDED */
-
-/* push current section onto the stack, does not switch to a new section */
-void push_section(void)
-{
-  if (current_section) {
-    if (secstack_index < SECSTACKSIZE)
-      secstack[secstack_index++] = current_section;
-    else
-      general_error(76);  /* section stack overflow */
-  }
-  else
-    general_error(3);  /* no current section */
-}
-
-/* pull the top section from the stack and switch to it */
-section *pop_section(void)
-{
-  if (secstack_index > 0)
-    set_section(secstack[--secstack_index]);
-  else
-    general_error(77);  /* section stack empty */
-  return current_section;
-}
-
-/* end a relocated ORG block */
-int end_rorg(void)
-{
-  section *s = default_section();
-
-  if (s == NULL) {
-    general_error(3);
-    return 0;
-  }
-  if (s->flags & IN_RORG) {
-    add_atom(s,new_rorgend_atom());
-    if (s->flags & PREVABS)
-      s->flags |= ABSOLUTE;
-    else
-      s->flags &= ~ABSOLUTE;
-    s->flags &= ~IN_RORG;
-    return 1;
-  }
-  general_error(44);  /* no Rorg block to end */
-  return 0;
-}
-
-/* end a relocated ORG block when currently active */
-void try_end_rorg(void)
-{
-  if (current_section!=NULL && (current_section->flags&IN_RORG))
-    end_rorg();
-}
-
-/* start a relocated ORG block */
-void start_rorg(taddr rorg)
-{
-  section *s = default_section();
-
-  if (s == NULL) {
-    general_error(3);
-    return;
-  }
-  if (s->flags & IN_RORG)
-    end_rorg();  /* we are already in a ROrg-block, so close it first */
-  add_atom(s,new_rorg_atom(rorg));
-  s->flags |= IN_RORG;
-  if (!(s->flags & ABSOLUTE)) {
-    s->flags &= ~PREVABS;
-    s->flags |= ABSOLUTE;  /* make section absolute during the ROrg-block */
-  }
-  else
-    s->flags |= PREVABS;
-}
-
-void print_section(FILE *f,section *sec)
-{
-  atom *p;
-  taddr pc=sec->org;
-  fprintf(f,"section %s (attr=<%s> align=%llu):\n",
-          sec->name,sec->attr,ULLTADDR(sec->align));
-  for(p=sec->first;p;p=p->next){
-    pc=pcalign(p,pc);
-    fprintf(f,"%8llx: ",ULLTADDR(pc));
-    print_atom(f,p);
-    fprintf(f,"\n");
-    pc+=atom_size(p,sec,pc);
-  }
 }

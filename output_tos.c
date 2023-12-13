@@ -1,11 +1,12 @@
-/* output_tos.c Atari TOS executable output driver for vasm */
-/* (c) in 2009-2016,2020,2021 by Frank Wille */
+/* tos.c Atari TOS executable output driver for vasm */
+/* (c) in 2009-2016,2020,2021,2023 by Frank Wille */
 
 #include "vasm.h"
 #include "output_tos.h"
 #if defined(OUTTOS) && defined(VASM_CPU_M68K)
-static char *copyright="vasm tos output module 1.2 (c) 2009-2016,2020,2021 Frank Wille";
+static char *copyright="vasm tos output module 2.3 (c) 2009-2016,2020,2021,2023 Frank Wille";
 int tos_hisoft_dri = 1;
+int sozobonx_dri;
 
 static int tosflags,textbasedsyms;
 static int max_relocs_per_atom;
@@ -13,23 +14,25 @@ static section *sections[3];
 static utaddr secsize[3];
 static utaddr secoffs[3];
 static utaddr sdabase,lastoffs;
+static rlist **sorted_rlist;
 
 #define SECT_ALIGN 2  /* TOS sections have to be aligned to 16 bits */
 
 
+
 static int tos_initwrite(section *sec,symbol *sym)
 {
-  int nsyms = 0;
-  int i;
+  int nsyms,i;
 
-  /* find exactly one .text, .data and .bss section for a.out */
+  if (!exec_out || sozobonx_dri)
+    tos_hisoft_dri = 0;  /* 8 character symbols only, in object files */
+
+  /* find exactly one text, data and bss section for DRI */
   sections[S_TEXT] = sections[S_DATA] = sections[S_BSS] = NULL;
   secsize[S_TEXT] = secsize[S_DATA] = secsize[S_BSS] = 0;
 
   for (; sec; sec=sec->next) {
-    /* section size is assumed to be in in (sec->pc - sec->org), otherwise
-       we would have to calculate it from the atoms and store it there */
-    if ((sec->pc - sec->org) > 0 || (sec->flags & HAS_SYMBOLS)) {
+    if (get_sec_size(sec) > 0 || (sec->flags & HAS_SYMBOLS)) {
       i = get_sec_type(sec);
       if (i<S_TEXT || i>S_BSS) {
         output_error(3,sec->attr);  /* section attributes not supported */
@@ -55,13 +58,22 @@ static int tos_initwrite(section *sec,symbol *sym)
   sdabase = secoffs[S_DATA] + 0x8000;
 
   /* count symbols */
+  nsyms = sozobonx_dri ? 1 : 0;  /* first symbol may be "SozobonX" */
   for (; sym; sym=sym->next) {
     /* ignore symbols preceded by a '.' and internal symbols */
-    if (*sym->name!='.' && *sym->name!=' ') {
-      if (!(sym->flags & (VASMINTERN|COMMON)) && sym->type == LABSYM) {
-        nsyms++;
-        if ((strlen(sym->name) > DRI_NAMELEN) && tos_hisoft_dri)
-          nsyms++;  /* extra symbol for long name */
+    if (*sym->name!='.' && *sym->name!=' ' && !(sym->flags & VASMINTERN)) {
+      if (sym->flags & WEAK)
+        output_error(10,sym->name);  /* weak symbol treated as global */
+
+      if (!exec_out || (!(sym->flags & COMMON) &&
+          (sym->type==LABSYM || sym->type==EXPRESSION))) {
+        sym->idx = (unsigned long)nsyms++;
+        if (strlen(sym->name) > DRI_NAMELEN) {
+          if (sozobonx_dri)
+            nsyms += (strlen(sym->name) - 1) / DRI_NAMELEN;
+          else if (tos_hisoft_dri)
+            nsyms++;  /* one extra symbol for long name */
+        }
       }
     }
     else {
@@ -72,7 +84,7 @@ static int tos_initwrite(section *sec,symbol *sym)
       sym->flags |= VASMINTERN;
     }
   }
-  return no_symbols ? 0 : nsyms;
+  return (exec_out && no_symbols) ? 0 : nsyms;
 }
 
 
@@ -124,16 +136,9 @@ static void do_relocs(section *asec,taddr pc,atom *a)
 /* Try to resolve all relocations in a DATA or SPACE atom.
    Very simple implementation which can only handle basic 68k relocs. */
 {
+  rlist *rl = get_relocs(a);
   int rcnt = 0;
   section *sec;
-  rlist *rl;
-
-  if (a->type == DATA)
-    rl = a->content.db->relocs;
-  else if (a->type == SPACE)
-    rl = a->content.sb->relocs;
-  else
-    rl = NULL;
 
   while (rl) {
     switch (rl->type) {
@@ -183,7 +188,8 @@ static void tos_writesection(FILE *f,section *sec,taddr sec_align)
 
     for (a=sec->first; a; a=a->next) {
       npc = fwpcalign(f,a,sec,pc);
-      do_relocs(sec,npc,a);
+      if (exec_out)
+        do_relocs(sec,npc,a);
       if (a->type == DATA)
         fwdata(f,a->content.db->data,a->content.db->size);
       else if (a->type == SPACE)
@@ -195,10 +201,12 @@ static void tos_writesection(FILE *f,section *sec,taddr sec_align)
 }
 
 
-static void write_dri_sym(FILE *f,char *name,int type,taddr value)
+static void write_dri_sym(FILE *f,const char *name,int type,taddr value)
 {
   struct DRIsym stab;
-  int longname = (strlen(name) > DRI_NAMELEN) && tos_hisoft_dri;
+  int namelen = strlen(name);
+  int longname = (namelen > DRI_NAMELEN) && tos_hisoft_dri;
+  int szb_extensions = sozobonx_dri ? (namelen-1) / DRI_NAMELEN : 0;
 
   strncpy(stab.name,name,DRI_NAMELEN);
   setval(1,stab.type,sizeof(stab.type),longname?(type|STYP_LONGNAME):type);
@@ -212,97 +220,232 @@ static void write_dri_sym(FILE *f,char *name,int type,taddr value)
     strncpy(rest_of_name,name+DRI_NAMELEN,sizeof(struct DRIsym));
     fwdata(f,rest_of_name,sizeof(struct DRIsym));
   }
+  else {
+    int i = DRI_NAMELEN;
+
+    while (szb_extensions--) {
+      strncpy(stab.name,name+i,DRI_NAMELEN);
+      setval(1,stab.type,sizeof(stab.type),STYP_XFLAGS);
+      setval(1,stab.value,sizeof(stab.value),XVALUE);
+      fwdata(f,&stab,sizeof(struct DRIsym));
+      i += DRI_NAMELEN;
+    }
+  }
 }
+
+
+static const int labtype[] = { STYP_TEXT,STYP_DATA,STYP_BSS };
 
 
 static void tos_symboltable(FILE *f,symbol *sym)
 {
-  static const int labtype[] = { STYP_TEXT,STYP_DATA,STYP_BSS };
   int t;
 
   for (; sym; sym=sym->next) {
-    /* The Devpac DRI symbol table in executables contains all labels,
-       no matter if global or local. But no equates or other types. */
-    if (!(sym->flags & (VASMINTERN|COMMON)) && sym->type == LABSYM) {
-      if (sym->flags & WEAK)
-        output_error(10,sym->name);  /* weak symbol not supported */
-      t = labtype[sym->sec->idx] | STYP_DEFINED | STYP_GLOBAL;
+    /* The TOS symbol table in executables contains all labels and
+       equates, no matter if global or local. */
+    if (!(sym->flags & (VASMINTERN|COMMON)) &&
+        (sym->type==LABSYM || sym->type==EXPRESSION)) {
+      t = (sym->type==LABSYM ? labtype[sym->sec->idx] : STYP_EQUATED) |
+          STYP_DEFINED;
+      if (sym->flags & EXPORT)
+        t |= STYP_GLOBAL;
       write_dri_sym(f,sym->name,t,tos_sym_value(sym,textbasedsyms));
     }
   }
 }
 
 
-static int offscmp(const void *offs1,const void *offs2)
+static void dri_symboltable(FILE *f,symbol *sym)
 {
-  return *(int *)offs1 - *(int *)offs2;
+  int t;
+
+  for (; sym; sym=sym->next) {
+    if (!(sym->flags & VASMINTERN)) {
+      switch (sym->type) {
+        case LABSYM:
+          t = labtype[sym->sec->idx] | STYP_DEFINED;
+          break;
+        case IMPORT:
+          t = STYP_EXTERNAL | STYP_DEFINED;
+          break;
+        case EXPRESSION:
+          t = STYP_EQUATED | STYP_DEFINED;
+          break;
+        default:
+          ierror(0);
+      }
+      if ((sym->flags & EXPORT) && sym->type!=IMPORT)
+        t |= STYP_GLOBAL;
+
+      if (sym->flags & COMMON)
+        write_dri_sym(f,sym->name,t,get_sym_size(sym));
+      else
+        write_dri_sym(f,sym->name,t,get_sym_value(sym));
+    }
+  }
+}
+
+
+static int offscmp(const void *left,const void *right)
+{
+  rlist *rl1 = *(rlist **)left;
+  rlist *rl2 = *(rlist **)right;
+
+  return (int)((nreloc *)rl1->reloc)->byteoffset
+         - (int)((nreloc *)rl2->reloc)->byteoffset;
+}
+
+
+static int get_sorted_rlist(atom *a)
+{
+  rlist *rl = get_relocs(a);
+  int nrel = 0;
+
+  while (rl) {
+    if (nrel >= max_relocs_per_atom) {
+      max_relocs_per_atom++;
+      sorted_rlist = myrealloc(sorted_rlist,
+                               max_relocs_per_atom * sizeof(rlist **));
+    }
+    sorted_rlist[nrel++] = rl;
+    rl = rl->next;
+  }
+
+  if (nrel > 1)
+    qsort(sorted_rlist,nrel,sizeof(rlist *),offscmp);
+  return nrel;
 }
 
 
 static int tos_writerelocs(FILE *f,section *sec)
 {
   int n = 0;
-  int *sortoffs = mymalloc(max_relocs_per_atom*sizeof(int));
 
   if (sec) {
     utaddr pc = secoffs[sec->idx];
-    utaddr npc;
     atom *a;
-    rlist *rl;
 
     for (a=sec->first; a; a=a->next) {
-      int nrel=0;
+      int nrel;
 
-      npc = pcalign(a,pc);
+      pc = pcalign(a,pc);
 
-      if (a->type == DATA)
-        rl = a->content.db->relocs;
-      else if (a->type == SPACE)
-        rl = a->content.sb->relocs;
-      else
-        rl = NULL;
-
-      while (rl) {
-        if (rl->type==REL_ABS && ((nreloc *)rl->reloc)->size==32)
-          sortoffs[nrel++] = ((nreloc *)rl->reloc)->byteoffset;
-        rl = rl->next;
-      }
-
-      if (nrel) {
+      if (nrel = get_sorted_rlist(a)) {
+        utaddr newoffs;
         int i;
 
-        /* first sort the atom's relocs */
-        if (nrel > 1)
-          qsort(sortoffs,nrel,sizeof(int),offscmp);
-
-        /* write differences between them */
-        n += nrel;
+        /* write differences between reloc offsets */
         for (i=0; i<nrel; i++) {
-          utaddr newoffs = npc + sortoffs[i];
+          /* make sure to process 32-bit absolute relocations only! */
+          if (sorted_rlist[i]->type==REL_ABS
+              && ((nreloc *)sorted_rlist[i]->reloc)->size==32) {
+            newoffs = pc + ((nreloc *)sorted_rlist[i]->reloc)->byteoffset;
+            n++;
 
-          if (lastoffs) {
-            /* determine 8bit difference to next relocation */
-            taddr diff = newoffs - lastoffs;
+            if (lastoffs) {
+              /* determine 8bit difference to next relocation */
+              taddr diff = newoffs - lastoffs;
 
-            if (diff < 0)
-              ierror(0);
-            while (diff > 254) {
-              fw8(f,1);
-              diff -= 254;
+              if (diff < 0)
+                ierror(0);
+              while (diff > 254) {
+                fw8(f,1);
+                diff -= 254;
+              }
+              fw8(f,(uint8_t)diff);
             }
-            fw8(f,(uint8_t)diff);
+            else  /* first entry is a 32 bits offset */
+              fw32(f,newoffs,1);
+            lastoffs = newoffs;
           }
-          else  /* first entry is a 32 bits offset */
-            fw32(f,newoffs,1);
-          lastoffs = newoffs;
         }
       }
-      pc = npc + atom_size(a,sec,npc);
+      pc += atom_size(a,sec,pc);
     }
   }
 
-  myfree(sortoffs);
   return n;
+}
+
+
+static void dri_writerelocs(FILE *f,section *sec,taddr sec_align)
+{
+  static const uint16_t sect_relocs[] = { 2, 1, 3 };  /* text, data, bss */
+
+  if (sec) {
+    utaddr pc,npc;
+    atom *a;
+
+    /* The DRI reloc table has the same size as the section itself,
+       but all words which have a relocation (or external reference)
+       are indicated by a reloc-type in the least significant three
+       bits (0-7). The remaining 13 bits are used as an optional index
+       into the symbol table. */
+    for (npc=0,a=sec->first; a; a=a->next) {
+      size_t offs = 0;
+      int nrel,i;
+
+      pc = fwpcalign(f,a,sec,npc);
+      npc = pc + atom_size(a,sec,pc);
+      nrel = get_sorted_rlist(a);
+
+      for (i=0; i<nrel; i++) {
+        if (sorted_rlist[i]->type <= LAST_STANDARD_RELOC) {
+          nreloc *r = (nreloc *)sorted_rlist[i]->reloc;
+          size_t roffs = r->byteoffset;
+          symbol *sym = r->sym;
+          uint16_t t = 0;
+
+          fwspace(f,roffs-offs);
+          offs = roffs;
+
+          switch (sorted_rlist[i]->type) {
+            case REL_ABS:
+              if (r->size==16 || r->size==32) {    /* @@@ restrict to 32? */
+                if (sym->type==LABSYM && sym->sec)
+                  t = sect_relocs[sym->sec->idx];  /* text, data, bss reloc */
+                else if (sym->type == IMPORT)
+                  t = 4;                           /* absolute xref */
+              }
+              break;
+            case REL_PC:
+              if ((sym->type==LABSYM || sym->type==IMPORT)
+                  && r->size==16)
+                t = 6;                             /* PC-rel xref always 16-bit */
+              break;
+            case REL_SD:  /* uses normal ABS reloc type with word-size */
+              if ((sym->type==LABSYM || sym->type==IMPORT)
+                  && r->size==16)
+                t = 4;                             /* Baserel is always 16-bit */
+              break;
+          }
+
+          if (t!=0 && r->bitoffset==0 && r->mask==DEFMASK) {
+            /* DRI only supports 16- and 32-bit relocations */
+            if (r->size == 32) {
+              fw16(f,5,1);  /* write longword type indicator to MSW */
+              offs += 2;
+            }
+            if (t==4 || t==6) {
+              /* external reference requires symbol index in bits 3..15 */
+              if (sym->idx > 0x1fff)
+                output_error(19);  /* too many symbols */
+              t |= sym->idx << 3;
+            }
+            fw16(f,t,1);
+            offs += 2;
+          }
+          else
+            unsupp_reloc_error(sorted_rlist[i]);
+        }
+        else
+          unsupp_reloc_error(sorted_rlist[i]);
+      }
+      fwspace(f,(size_t)(npc-pc)-offs);
+    }
+    fwalign(f,pc,sec_align);
+  }
 }
 
 
@@ -311,18 +454,40 @@ static void write_output(FILE *f,section *sec,symbol *sym)
   int nsyms = tos_initwrite(sec,sym);
   int nrelocs = 0;
 
+  if (sozobonx_dri!=0 && nsyms==1)
+    nsyms = 0;
+
   tos_header(f,secsize[S_TEXT],secsize[S_DATA],secsize[S_BSS],
-             nsyms*sizeof(struct DRIsym),tosflags);
+             nsyms*sizeof(struct DRIsym),exec_out?tosflags:0);
+
   tos_writesection(f,sections[S_TEXT],SECT_ALIGN);
   tos_writesection(f,sections[S_DATA],SECT_ALIGN);
-  if (nsyms)
-    tos_symboltable(f,sym);
-  nrelocs += tos_writerelocs(f,sections[S_TEXT]);
-  nrelocs += tos_writerelocs(f,sections[S_DATA]);
-  if (nrelocs)
-    fw8(f,0);
-  else
-    fw32(f,0,1);
+
+  if (nsyms) {
+    if (sozobonx_dri)
+      write_dri_sym(f,XNAME,STYP_XFLAGS,XVALUE);
+    if (exec_out)
+      tos_symboltable(f,sym);
+    else
+      dri_symboltable(f,sym);
+  }
+
+  sorted_rlist = mymalloc(max_relocs_per_atom*sizeof(rlist **));
+
+  if (exec_out) {
+    nrelocs += tos_writerelocs(f,sections[S_TEXT]);
+    nrelocs += tos_writerelocs(f,sections[S_DATA]);
+    if (nrelocs)
+      fw8(f,0);
+    else
+      fw32(f,0,1);
+  }
+  else {
+    dri_writerelocs(f,sections[S_TEXT],SECT_ALIGN);
+    dri_writerelocs(f,sections[S_DATA],SECT_ALIGN);
+  }
+
+  myfree(sorted_rlist);
 }
 
 
@@ -334,6 +499,14 @@ static int output_args(char *p)
   }
   else if (!strcmp(p,"-monst")) {
     textbasedsyms = 1;
+    return 1;
+  }
+  else if (!strcmp(p,"-stdsymbols")) {
+    tos_hisoft_dri = 0;
+    return 1;
+  }
+  else if (!strcmp(p,"-szbx")) {
+    sozobonx_dri = 1;
     return 1;
   }
   return 0;

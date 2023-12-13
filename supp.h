@@ -1,5 +1,5 @@
 /* supp.h miscellaneous support routines */
-/* (c) in 2008-2022 by Frank Wille */
+/* (c) in 2008-2023 by Frank Wille */
 
 #ifndef SUPP_H
 #define SUPP_H
@@ -33,8 +33,8 @@ void *setval_signext(int,void *,size_t,size_t,int64_t);
 uint64_t readbits(int,void *,unsigned,unsigned,unsigned);
 void setbits(int,void *,unsigned,unsigned,unsigned,uint64_t);
 int countbits(taddr);
+int tffs(taddr);
 void copy_cpu_taddr(void *,taddr,size_t);
-int patch_nreloc(atom *,rlist *,int,taddr,int);
 
 #if FLOAT_PARSER
 void conv2ieee32(int,uint8_t *,tfloat);
@@ -44,6 +44,7 @@ int flt_chkrange(tfloat,int);
 
 void fw8(FILE *,uint8_t);
 void fw16(FILE *,uint16_t,int);
+void fw24(FILE *,uint32_t,int);
 void fw32(FILE *,uint32_t,int);
 void fwdata(FILE *,const void *,size_t);
 void fwsblock(FILE *,sblock *);
@@ -52,11 +53,11 @@ void fwalign(FILE *,taddr,taddr);
 int fwalignpattern(FILE *,taddr,uint8_t *,int);
 taddr fwpcalign(FILE *,atom *,section *,taddr);
 size_t filesize(FILE *);
-int abs_path(char *);
+int abs_path(const char *);
 
 int stricmp(const char *,const char *);
 int strnicmp(const char *,const char *,size_t);
-char *mystrdup(char *);
+char *mystrdup(const char *);
 char *cnvstr(const char *,int);
 char *cutstr(strbuf *,const char *,size_t);
 char *strbuf_alloc(strbuf *,size_t);
@@ -70,6 +71,7 @@ taddr palign(taddr,int);
 taddr pcalign(atom *,taddr);
 int make_padding(taddr,uint8_t *,int);
 
+size_t chk_sec_overlap(section *);
 taddr get_sym_value(symbol *);
 taddr get_sym_size(symbol *);
 utaddr get_sec_size(section *);

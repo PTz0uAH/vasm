@@ -1,12 +1,22 @@
-/* output_hunk.c AmigaOS hunk format output driver for vasm */
+/* hunk.c AmigaOS hunk format output driver for vasm */
 /* (c) in 2002-2022 by Frank Wille */
 
 #include "vasm.h"
 #include "osdep.h"
 #include "output_hunk.h"
 #if defined(OUTHUNK) && (defined(VASM_CPU_M68K) || defined(VASM_CPU_PPC))
-static char *copyright="vasm hunk format output module 2.14b (c) 2002-2022 Frank Wille";
+static char *copyright="vasm hunk format output module 2.14c (c) 2002-2022 Frank Wille";
 int hunk_onlyglobal;
+
+static uint32_t sec_cnt;
+static symbol **secsyms;
+
+/* options */
+static int databss;
+static int kick1;
+static int exthunk;
+static int genlinedebug;
+static int keep_empty_sects;
 
 /* (currently two-byte only) padding value for not 32-bit aligned code hunks */
 #ifdef VASM_CPU_M68K
@@ -15,17 +25,8 @@ static uint16_t hunk_pad = 0x4e71;
 static uint16_t hunk_pad = 0;
 #endif
 
-static int databss;
-static int kick1;
-static int exthunk;
-static int genlinedebug;
-static int keep_empty_sects;
 
-static uint32_t sec_cnt;
-static symbol **secsyms;
-
-
-static uint32_t strlen32(char *s)
+static uint32_t strlen32(const char *s)
 /* calculate number of 32 bit words required for
    a string without terminator */
 {
@@ -33,7 +34,7 @@ static uint32_t strlen32(char *s)
 }
 
 
-static void fwname(FILE *f,char *name)
+static void fwname(FILE *f,const char *name)
 {
   size_t n = strlen(name);
 
@@ -519,14 +520,7 @@ static void process_relocs(atom *a,struct list *reloclist,
                            struct list *xreflist,section *sec,utaddr pc)
 /* convert an atom's rlist into relocations and xrefs */
 {
-  rlist *rl;
-
-  if (a->type == DATA)
-    rl = a->content.db->relocs;
-  else if (a->type == SPACE)
-    rl = a->content.sb->relocs;
-  else
-    return;
+  rlist *rl = get_relocs(a);
 
   if (rl == NULL)
     return;
@@ -761,7 +755,7 @@ static void ext_refs(FILE *f,struct list *xreflist)
   while (xreflist->first->next) {
     struct hunkxref *x,*next;
     uint32_t n,type,size;
-    char *name;
+    const char *name;
 
     extheader(f);
     x = (struct hunkxref *)xreflist->first;
@@ -1010,8 +1004,14 @@ static void write_exec(FILE *f,section *sec,symbol *sym)
           else
             fwalign(f,pc,4);
         }
-        else /* HUNK_BSS */
-          fw32(f,(get_sec_size(sec)+3)>>2,1);
+        else {
+          /* HUNK_BSS */
+          uint32_t len = (get_sec_size(sec) + 3) >> 2;
+
+          if (kick1 && len > 0x10000)
+            output_error(18,sec->name);  /* warn about kickstart 1.x bug */
+          fw32(f,len,1);
+        }
 
         if (!kick1)
           reloc_hunk(f,HUNK_ABSRELOC32,1,&reloclist);
